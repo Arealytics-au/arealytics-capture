@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="ext-resource-dependency" content="assets/arealytics-logo-full.png" />
+<title>Arealytics — Daily Capture Submission</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
+<style>
+  html, body { margin: 0; padding: 0; background: #F4F6FB; color: #0E1320;
+    font-family: "Inter", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  * { box-sizing: border-box; }
+  button { font-family: inherit; cursor: pointer; border: none; background: none; padding: 0; color: inherit; }
+  input, select, textarea { font-family: inherit; }
+  a { color: #0A1F5C; }
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-thumb { background: #C7CCD9; border-radius: 99px; border: 3px solid #F4F6FB; }
+  .ar-field:focus { outline: none; border-color: #0A1F5C !important; box-shadow: 0 0 0 3px rgba(10,31,92,0.12); }
+  @keyframes ar-spin { to { transform: rotate(360deg); } }
+  @keyframes ar-pop { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<!-- Hosted submission backend (file uploads). Loaded for the Supabase path. -->
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<!-- Zero-setup fallback: bundle the day's files into one downloadable package. -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<!-- In-browser DJI decoder: validates & summarises .SRT / .TXT on upload. -->
+<script src="flight-decoder.js"></script>
+</head>
+<body>
+<img src="assets/arealytics-logo-full.png" style="display:none" alt="" id="__logo" />
+<template id="__bundler_thumbnail">
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+    <rect width="200" height="200" fill="#0A1F5C"/>
+    <g transform="translate(58,56)" fill="none" stroke="#FF7A1A" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M42 0 L84 74 L42 56 L0 74 Z"/>
+    </g>
+    <text x="100" y="168" text-anchor="middle" fill="#FFFFFF" font-family="ui-monospace,monospace" font-size="15" font-weight="700" letter-spacing="3">AREALYTICS</text>
+  </svg>
+</template>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useRef, useMemo } = React;
+
+/* ============================================================================
+   ADMIN SETUP — fill these in once, then host this single file (the same file
+   is served to every operator). Leave blank to use the download-package
+   fallback (operators send you one file you drop into the dashboard).
+
+   Supabase (free · https://supabase.com): create a project → Storage → create a
+   PUBLIC bucket named below → Table editor → create table `submissions`
+   (columns: operator text, op_id text, state text, city text, capture_date date,
+   flew bool, reason text, notes text, files jsonb, ref text, created_at timestamptz
+   default now()). In Storage + Table policies, allow anon INSERT/UPLOAD.
+   Paste the Project URL and the anon public key (Settings → API) below.
+   ============================================================================ */
+const CONFIG = {
+  // PRIMARY now: files go straight into your Google Drive "Flight Logs" folder,
+  // sorted by operator + date, via the Apps Script you deploy (see drive-upload/DEPLOY.md).
+  // Paste the Web app /exec URL here to turn it on.
+  DRIVE_ENDPOINT: 'https://script.google.com/macros/s/AKfycbwGPAWdqDcadMudMcoqmC7MZQAteHQgM1pRr2U45NxevLBJ1WDt6EeNST6YCLiKxknq/exec',
+  // Optional legacy backend (only used if DRIVE_ENDPOINT is blank):
+  SUPABASE_URL: 'https://jpqbgfhlypopekwgbdfe.supabase.co',
+  SUPABASE_ANON_KEY: 'sb_publishable_yLqecgI7777jlmAXBmeTkA_F9MSLrby',
+  BUCKET: 'flight-files',
+  TABLE: 'submissions',
+  DECRYPT_ENDPOINT: '',     // your deployed decrypt-service URL + /decrypt (encrypted .TXT → CSV)
+};
+window.DECRYPT_ENDPOINT = CONFIG.DECRYPT_ENDPOINT;   // flight-decoder.js reads this
+
+// Roster — operators self-identify. Matches the dashboard roster.
+const ROSTER = [
+  { id: 'op-marc',   name: 'Marc Margot',    city: 'Sydney',         state: 'NSW' },
+  { id: 'op-paul',   name: 'Paul McConnell', city: 'Sydney',         state: 'NSW' },
+  { id: 'op-lucas',  name: 'Lucas Moy',      city: 'Melbourne',      state: 'VIC' },
+  { id: 'op-jakob',  name: 'Jakob Kelly',    city: 'Melbourne',      state: 'VIC' },
+  { id: 'op-hunter', name: 'Hunter Pateidl', city: 'Brisbane',       state: 'QLD' },
+  { id: 'op-damien', name: 'Damien Poole',   city: 'Sunshine Coast', state: 'QLD' },
+  { id: 'op-alex',   name: 'Alex Ballard',   city: 'Gold Coast',     state: 'QLD' },
+  { id: 'op-joe',    name: 'Joe Arthey',     city: 'Perth',          state: 'WA'  },
+  { id: 'op-sam',    name: 'Sam',            city: 'Adelaide',       state: 'SA'  },
+  { id: 'op-justin', name: 'Justin',         city: 'Adelaide',       state: 'SA'  },
+];
+
+const NO_FLY_REASONS = [
+  'Rain', 'Storms', 'High wind', 'Low cloud / poor light', 'Fog',
+  'Equipment fault', 'CASA / permit hold', 'Site access', 'Other',
+];
+
+// palette
+const NAVY = '#0A1F5C', ORANGE = '#FF7A1A', INK = '#0E1320',
+      MUTED = '#5A6270', FAINT = '#8A92A6', LINE = '#E2E6F0', BG = '#F4F6FB';
+
+const fmtBytes = (n) => n < 1024 ? n + ' B'
+  : n < 1048576 ? (n / 1024).toFixed(0) + ' KB'
+  : (n / 1048576).toFixed(1) + ' MB';
+
+const okFile = (name) => /\.(srt|txt)$/i.test(name);
+const fkey = (f) => f.name + '|' + f.size;
+const todayISO = () => { const d = new Date(); const z = (x) => String(x).padStart(2, '0');
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`; };
+const prettyDate = (iso) => { try { return new Date(iso + 'T00:00:00').toLocaleDateString('en-AU',
+  { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }); } catch (e) { return iso; } };
+
+const formStyles = {
+  field: { width: '100%', padding: '13px 14px', fontSize: 15, color: INK, background: '#fff',
+    border: `1.5px solid ${LINE}`, borderRadius: 11, transition: 'border-color .15s, box-shadow .15s' },
+  label: { display: 'block', fontSize: 12.5, fontWeight: 700, color: NAVY, letterSpacing: '0.02em',
+    marginBottom: 8, textTransform: 'uppercase' },
+  hint: { fontSize: 12.5, color: FAINT, marginTop: 6, lineHeight: 1.45 },
+};
+
+function Logo() {
+  const el = document.getElementById('__logo');
+  const src = el && el.src ? el.src : 'assets/arealytics-logo-full.png';
+  return <img src={src} alt="Arealytics" style={{ height: 30, display: 'block' }}
+    onError={(e) => { e.target.style.display = 'none'; }} />;
+}
+
+function App() {
+  const [opId, setOpId] = useState('');
+  const [otherName, setOtherName] = useState('');
+  const [date, setDate] = useState(todayISO());
+  const [flew, setFlew] = useState('yes');      // 'yes' | 'no'
+  const [reason, setReason] = useState('');
+  const [reasonOther, setReasonOther] = useState('');
+  const [files, setFiles] = useState([]);        // File[]
+  const [decoded, setDecoded] = useState({});    // fkey -> { status, ...summary }
+  const [dateTouched, setDateTouched] = useState(false);
+  const [notes, setNotes] = useState('');
+  const [drag, setDrag] = useState(false);
+  const [status, setStatus] = useState('idle');  // idle | submitting | done | error
+  const [progress, setProgress] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
+  const [result, setResult] = useState(null);    // { ref, mode }
+  const [setupOpen, setSetupOpen] = useState(false);
+  const fileRef = useRef(null);
+
+  const driveOn = !!CONFIG.DRIVE_ENDPOINT;
+  const configured = driveOn || !!(CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY);
+  const op = ROSTER.find(o => o.id === opId);
+  const opName = opId === 'other' ? otherName.trim() : (op ? op.name : '');
+
+  const totalBytes = useMemo(() => files.reduce((a, f) => a + f.size, 0), [files]);
+
+  // Aggregate decode readout for the file list.
+  const decList = files.map(f => decoded[fkey(f)]).filter(Boolean);
+  const decOk = decList.filter(d => d.status === 'ok').length;
+  const decEnc = decList.filter(d => d.status === 'encrypted').length;
+  const decErr = decList.filter(d => d.status === 'error').length;
+  const decSec = decList.reduce((a, d) => a + (d.durationSec || 0), 0);
+  const decodedNote = decList.length
+    ? `  ·  ${decOk} decoded${decEnc ? ` · ${decEnc} server‑side` : ''}${decErr ? ` · ${decErr} unreadable` : ''}${decSec ? ` · ${Math.round(decSec / 60)} min total` : ''}`
+    : '';
+
+  // ---- per-field completion (drives the ticks + the submit gate) ----
+  const decStates = files.map(f => decoded[fkey(f)] || { status: 'decoding' });
+  const anyDecoding = decStates.some(d => d.status === 'decoding');
+  const anyError = decStates.some(d => d.status === 'error');
+  const nameDone = !!opName;
+  const dateDone = !!date;
+  const filesDone = flew === 'yes' && files.length > 0 && !anyDecoding && !anyError
+    && decStates.every(d => d.status === 'ok' || d.status === 'encrypted');
+  const reasonDone = flew === 'no' && !!reason && (reason !== 'Other' || !!reasonOther.trim());
+
+  const addFiles = (list) => {
+    const incoming = Array.from(list || []).filter(f => okFile(f.name));
+    const seen = new Set(files.map(f => fkey(f)));
+    const fresh = incoming.filter(f => !seen.has(fkey(f)));
+    if (!fresh.length) return;
+    setFiles(prev => [...prev, ...fresh]);
+    setDecoded(d => { const n = { ...d }; fresh.forEach(f => { n[fkey(f)] = { status: 'decoding' }; }); return n; });
+    // Decode each new file in the browser — validate + summarise (SRT and TXT).
+    fresh.forEach(f => {
+      const k = fkey(f);
+      if (!window.FlightDecoder) { setDecoded(d => ({ ...d, [k]: { status: 'ok', model: null } })); return; }
+      window.FlightDecoder.decode(f).then(res => {
+        setDecoded(d => ({ ...d, [k]: { status: res.ok ? ((res.encrypted && !res.decrypted) ? 'encrypted' : 'ok') : 'error', ...res } }));
+        // First valid SRT date auto-fills the capture date (until the operator edits it).
+        if (res.ok && res.dateISO && !dateTouched) setDate(res.dateISO);
+      });
+    });
+  };
+  const removeFile = (i) => {
+    const f = files[i];
+    setFiles(prev => prev.filter((_, j) => j !== i));
+    if (f) setDecoded(d => { const n = { ...d }; delete n[fkey(f)]; return n; });
+  };
+
+  // The decoded CSV for a file (SRT / legacy TXT built in-browser; encrypted TXT already CSV
+  // from the decrypt service). Returns null when there's no telemetry to write.
+  const csvFor = (f) => {
+    const d = decoded[fkey(f)];
+    if (!d || !d.ok || (d.encrypted && !d.decrypted)) return null;
+    try { return window.FlightDecoder && window.FlightDecoder.toCSV(d, { operator: opName }); }
+    catch (e) { return null; }
+  };
+  const csvName = (name) => name.replace(/\.(srt|txt)$/i, '') + '.csv';
+
+  // validation
+  const errors = [];
+  if (!nameDone) errors.push('Select your name.');
+  if (!dateDone) errors.push('Choose the capture date.');
+  if (flew === 'yes') {
+    if (files.length === 0) errors.push('Upload the day’s .SRT / .TXT files (or switch to “Couldn’t fly”).');
+    else if (anyDecoding) errors.push('Checking your files… one moment.');
+    else if (anyError) errors.push('Remove the file(s) that couldn’t be read, then add the correct ones.');
+  }
+  if (flew === 'no' && !reason) errors.push('Pick why you couldn\u2019t fly.');
+  if (flew === 'no' && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
+  const reasonFinal = reason === 'Other' ? (reasonOther.trim() || 'Other') : reason;
+  const canSubmit = errors.length === 0 && status !== 'submitting';
+
+  const makeRef = () => `AR-${date.replace(/-/g, '')}-${(opId === 'other' ? 'EXT' : (op ? op.id.replace('op-', '').toUpperCase() : 'OP'))}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setStatus('submitting'); setErrorMsg(''); setProgress('');
+    const ref = makeRef();
+    const meta = {
+      ref, operator: opName, op_id: opId, state: op ? op.state : '', city: op ? op.city : '',
+      capture_date: date, flew: flew === 'yes', reason: flew === 'no' ? reasonFinal : '',
+      decoded: flew === 'yes' ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
+        name: f.name, status: d.status || null, model: d.model || null, encrypted: !!d.encrypted,
+        decrypted: !!d.decrypted, durationSec: d.durationSec || 0, samples: d.samples || 0,
+        distanceM: d.distanceM || 0, maxAltM: d.maxAltM || 0, dateISO: d.dateISO || null,
+        home: d.home || null, serial: d.serial || null, hasCsv: !!csvFor(f) }; }) : [],
+      notes: notes.trim(), submitted_at: new Date().toISOString(),
+    };
+    try {
+      if (driveOn) await submitDrive(meta);
+      else if (configured) await submitSupabase(meta);
+      else await submitBundle(meta);
+      setResult({ ref, mode: driveOn ? 'drive' : (configured ? 'hosted' : 'bundle') });
+      setStatus('done');
+    } catch (e) {
+      setErrorMsg(String(e && e.message ? e.message : e));
+      setStatus('error');
+    }
+  };
+
+  // ---- Google Drive path (primary) — files land in Flight Logs/Operator Uploads/<name>/<date>/ ----
+  function fileToB64(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => { const s = String(r.result || ''); resolve(s.slice(s.indexOf(',') + 1)); };
+      r.onerror = reject;
+      r.readAsDataURL(file);
+    });
+  }
+  async function postDrive(payload) {
+    // text/plain body => a "simple" request => no CORS preflight (Apps Script can't answer one).
+    const res = await fetch(CONFIG.DRIVE_ENDPOINT, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
+    let j = null; try { j = await res.json(); } catch (e) {}
+    if (j && j.ok === false) throw new Error(j.error || 'Drive upload failed');
+    return j || { ok: true };
+  }
+  async function submitDrive(meta) {
+    if (meta.flew) {
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        setProgress(`Uploading ${i + 1} / ${files.length} · ${f.name}`);
+        const dataB64 = await fileToB64(f);
+        await postDrive({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+          name: f.name, mimeType: f.type || 'application/octet-stream', dataB64 });
+        // save the decoded CSV alongside the raw file when we have telemetry
+        const csv = csvFor(f);
+        if (csv) {
+          await postDrive({ operator: meta.operator, date: meta.capture_date, name: csvName(f.name),
+            mimeType: 'text/csv', dataB64: btoa(unescape(encodeURIComponent(csv))) });
+        }
+      }
+    }
+    setProgress('Recording submission…');
+    await postDrive({ action: 'manifest', operator: meta.operator, op_id: meta.op_id,
+      date: meta.capture_date, ref: meta.ref, meta });
+  }
+
+  async function submitSupabase(meta) {
+    const sb = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+    const stored = [];
+    // Supabase Storage keys allow only [A-Za-z0-9._-] (plus '/'). DJI .txt app logs
+    // are named with brackets/spaces, e.g. DJIFlightRecord_..._[10-15-00].txt, which
+    // Storage rejects as an "Invalid key". Sanitise the key for upload, but keep the
+    // ORIGINAL filename in the row's `files` metadata so the owner sees the real name.
+    const keySafe = (s) => String(s).replace(/[^A-Za-z0-9._-]/g, '_');
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      setProgress(`Uploading ${i + 1} / ${files.length} \u00b7 ${f.name}`);
+      const path = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(f.name)}`;
+      const { error } = await sb.storage.from(CONFIG.BUCKET).upload(path, f, { upsert: false });
+      if (error) throw new Error('File upload failed: ' + error.message);
+      const rec = { name: f.name, size: f.size, path };
+      // Also upload the decoded CSV alongside the raw file, when we have telemetry.
+      const csv = csvFor(f);
+      if (csv) {
+        const cpath = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(csvName(f.name))}`;
+        const up = await sb.storage.from(CONFIG.BUCKET).upload(cpath, new Blob([csv], { type: 'text/csv' }), { upsert: false });
+        if (!up.error) rec.csvPath = cpath;
+      }
+      stored.push(rec);
+    }
+    setProgress('Recording submission\u2026');
+    const { error: insErr } = await sb.from(CONFIG.TABLE).insert([{ ...meta, files: stored }]);
+    if (insErr) throw new Error('Could not record the submission: ' + insErr.message);
+  }
+
+  async function submitBundle(meta) {
+    setProgress('Packaging your files\u2026');
+    const zip = new window.JSZip();
+    zip.file('submission.json', JSON.stringify({ ...meta, files: files.map(f => ({ name: f.name, size: f.size })) }, null, 2));
+    const folder = zip.folder('flight-files');
+    for (const f of files) folder.file(f.name, f);
+    // decoded CSVs alongside the raw files
+    const csvFolder = zip.folder('decoded-csv');
+    for (const f of files) { const csv = csvFor(f); if (csv) csvFolder.file(csvName(f.name), csv); }
+    const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `Arealytics_${meta.capture_date}_${meta.op_id}.zip`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  }
+
+  const reset = () => {
+    setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setFlew('yes');
+    setDateTouched(false);
+    setStatus('idle'); setResult(null); setProgress(''); setDate(todayISO());
+  };
+
+  // ---- success screen ----
+  if (status === 'done' && result) {
+    return (
+      <Shell>
+        <div style={{ textAlign: 'center', padding: '14px 4px', animation: 'ar-pop .35s ease' }}>
+          <div style={{ width: 64, height: 64, borderRadius: '50%', background: '#E8F6EE',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', margin: '0 auto 18px' }}>
+            <svg width="32" height="32" viewBox="0 0 32 32"><circle cx="16" cy="16" r="15" fill="#0B8B43"/>
+              <path d="M9 16.5 L14 21.5 L23 11" stroke="#fff" strokeWidth="3" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          </div>
+          <h2 style={{ margin: '0 0 8px', fontSize: 22, color: INK }}>Submission sent</h2>
+          <p style={{ margin: '0 auto 4px', color: MUTED, fontSize: 15, maxWidth: 380, lineHeight: 1.5 }}>
+            Thanks, {opName.split(' ')[0]}. Your {prettyDate(date)} wrap-up is in.
+          </p>
+          <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 13, color: NAVY,
+            background: '#fff', border: `1px solid ${LINE}`, borderRadius: 10, padding: '10px 14px',
+            display: 'inline-block', margin: '14px 0 6px' }}>Reference&nbsp; <b>{result.ref}</b></div>
+          {result.mode === 'bundle' && (
+            <p style={{ margin: '14px auto 0', color: MUTED, fontSize: 13.5, maxWidth: 400, lineHeight: 1.55 }}>
+              A file <b>downloaded to your device</b> — send it to your manager (the dashboard imports it).
+            </p>
+          )}
+          {result.mode === 'drive' && (
+            <p style={{ margin: '14px auto 0', color: MUTED, fontSize: 13.5, maxWidth: 400, lineHeight: 1.55 }}>
+              Saved to your <b>Arealytics Drive folder</b> — it syncs to the dashboard automatically.
+            </p>
+          )}
+          <div style={{ marginTop: 26 }}>
+            <button onClick={reset} style={{ ...btn(ORANGE), minWidth: 200 }}>Submit another day</button>
+          </div>
+        </div>
+      </Shell>
+    );
+  }
+
+  return (
+    <Shell setupOpen={setupOpen} setSetupOpen={setSetupOpen} configured={configured}>
+      {/* operator + date */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 18 }}>
+        <div>
+          <FieldLabel done={nameDone}>Your name</FieldLabel>
+          <select className="ar-field" style={formStyles.field} value={opId}
+            onChange={(e) => setOpId(e.target.value)}>
+            <option value="">Select your name…</option>
+            {ROSTER.map(o => <option key={o.id} value={o.id}>{o.name} — {o.city}, {o.state}</option>)}
+            <option value="other">Other / not listed…</option>
+          </select>
+          {opId === 'other' && (
+            <input className="ar-field" style={{ ...formStyles.field, marginTop: 10 }} placeholder="Type your full name"
+              value={otherName} onChange={(e) => setOtherName(e.target.value)} />
+          )}
+        </div>
+
+        <div>
+          <FieldLabel done={dateDone}>Capture date</FieldLabel>
+          <input className="ar-field" style={formStyles.field} type="date" value={date} max={todayISO()}
+            onChange={(e) => { setDate(e.target.value); setDateTouched(true); }} />
+          <div style={formStyles.hint}>{prettyDate(date)}</div>
+        </div>
+
+        {/* flew? segmented */}
+        <div>
+          <label style={formStyles.label}>Did you capture today?</label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <Seg active={flew === 'yes'} onClick={() => setFlew('yes')} color="#0B8B43"
+              title="Yes — captured" sub="Upload the day’s files" />
+            <Seg active={flew === 'no'} onClick={() => setFlew('no')} color={ORANGE}
+              title="Couldn’t fly" sub="Rain / weather / other" />
+          </div>
+        </div>
+
+        {/* flew branch */}
+        {flew === 'yes' ? (
+          <div>
+            <FieldLabel done={filesDone}>Today’s flight files</FieldLabel>
+            <div onClick={() => fileRef.current && fileRef.current.click()}
+              onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
+              onDragLeave={() => setDrag(false)}
+              onDrop={(e) => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); }}
+              style={{ border: `1.5px dashed ${drag ? NAVY : '#C7CCD9'}`, borderRadius: 13,
+                background: drag ? 'rgba(10,31,92,0.04)' : '#fff', padding: '22px 18px', cursor: 'pointer',
+                textAlign: 'center', transition: 'all .15s' }}>
+              <input ref={fileRef} type="file" multiple accept=".srt,.txt" hidden
+                onChange={(e) => addFiles(e.target.files)} />
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={NAVY} strokeWidth="1.7"
+                style={{ marginBottom: 6 }}><path d="M12 16V4M12 4 L7 9M12 4 L17 9" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" strokeLinecap="round"/></svg>
+              <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>Drop your <b>.SRT</b> & <b>.TXT</b> files</div>
+              <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>or tap to browse — one set per flight</div>
+            </div>
+            {files.length > 0 && (
+              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 7 }}>
+                {files.map((f, i) => {
+                  const dec = decoded[fkey(f)] || { status: 'decoding' };
+                  const isTxt = /\.txt$/i.test(f.name);
+                  const mins = dec.durationSec ? `${Math.floor(dec.durationSec / 60)}m ${dec.durationSec % 60}s` : null;
+                  return (
+                    <div key={f.name + i} style={{ background: '#fff', border: `1px solid ${LINE}`, borderRadius: 9, padding: '9px 12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                        <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 10.5, fontWeight: 700,
+                          color: '#fff', background: isTxt ? NAVY : ORANGE, padding: '3px 6px', borderRadius: 5 }}>
+                          {isTxt ? 'TXT' : 'SRT'}</span>
+                        <span style={{ flex: 1, minWidth: 0, fontSize: 13.5, color: INK, overflow: 'hidden',
+                          textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{f.name}</span>
+                        <span style={{ fontSize: 12, color: FAINT, fontFamily: '"JetBrains Mono", monospace' }}>{fmtBytes(f.size)}</span>
+                        <button onClick={() => removeFile(i)} title="Remove" style={{ color: FAINT, fontSize: 18, lineHeight: 1, padding: '0 2px' }}>×</button>
+                      </div>
+                      <div style={{ marginTop: 6, fontSize: 12, fontFamily: '"JetBrains Mono", monospace', display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {dec.status === 'decoding' && <span style={{ color: FAINT }}>Decoding…</span>}
+                        {dec.status === 'ok' && <span style={{ color: '#0B8B43' }}>✓ {dec.model || 'DJI'}{mins ? ` · ${mins}` : ''} · {(dec.samples || 0).toLocaleString()} pts</span>}
+                        {dec.status === 'encrypted' && <span style={{ color: NAVY }}>● {dec.model || 'DJI log'} · encrypted — decodes server‑side</span>}
+                        {dec.status === 'error' && <span style={{ color: '#C4452C' }}>Couldn’t read — {dec.error}</span>}
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{ fontSize: 12, color: MUTED, fontFamily: '"JetBrains Mono", monospace', marginTop: 2 }}>
+                  {files.length} file{files.length > 1 ? 's' : ''} · {fmtBytes(totalBytes)}{decodedNote}</div>
+              </div>
+            )}
+
+          </div>
+        ) : (
+          <div style={{ animation: 'ar-pop .25s ease' }}>
+            <FieldLabel done={reasonDone}>Why couldn’t you fly?</FieldLabel>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {NO_FLY_REASONS.map(r => (
+                <button key={r} onClick={() => setReason(r)}
+                  style={{ padding: '9px 14px', borderRadius: 999, fontSize: 13.5, fontWeight: 600,
+                    border: `1.5px solid ${reason === r ? NAVY : LINE}`,
+                    background: reason === r ? NAVY : '#fff', color: reason === r ? '#fff' : MUTED }}>{r}</button>
+              ))}
+            </div>
+            {reason === 'Other' && (
+              <input className="ar-field" style={{ ...formStyles.field, marginTop: 10 }} placeholder="Briefly, what stopped capture?"
+                value={reasonOther} onChange={(e) => setReasonOther(e.target.value)} />
+            )}
+            <div style={formStyles.hint}>This marks {prettyDate(date)} a non‑production day — it’s removed from your target.</div>
+          </div>
+        )}
+
+        {/* notes */}
+        <div>
+          <label style={formStyles.label}>Notes for the day <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· optional</span></label>
+          <textarea className="ar-field" style={{ ...formStyles.field, minHeight: 96, resize: 'vertical', lineHeight: 1.5 }}
+            placeholder="Anything worth mentioning — sites covered, access issues, equipment, handovers…"
+            value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </div>
+
+        {/* submit */}
+        {status === 'error' && (
+          <div style={{ background: '#FCEBEA', border: '1px solid #E5B4AE', borderRadius: 10, padding: '11px 13px',
+            fontSize: 13.5, color: '#9A2B1C', lineHeight: 1.5 }}>Couldn’t send: {errorMsg}</div>
+        )}
+        <div>
+          <button onClick={submit} disabled={!canSubmit}
+            style={{ ...btn(ORANGE), width: '100%', opacity: canSubmit ? 1 : 0.5,
+              cursor: canSubmit ? 'pointer' : 'not-allowed', display: 'flex', alignItems: 'center',
+              justifyContent: 'center', gap: 10 }}>
+            {status === 'submitting'
+              ? <><span style={{ width: 16, height: 16, border: '2px solid rgba(255,255,255,0.4)',
+                  borderTopColor: '#fff', borderRadius: '50%', animation: 'ar-spin .7s linear infinite' }} />
+                  {progress || 'Sending…'}</>
+              : (flew === 'yes' ? 'Submit today’s capture' : 'Submit no‑fly day')}
+          </button>
+          {status !== 'submitting' && errors.length > 0 && (opId || files.length > 0 || flew === 'no') && (
+            <div style={{ ...formStyles.hint, color: ORANGE, marginTop: 9 }}>{errors[0]}</div>
+          )}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+function FieldLabel({ done, children }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+      <span style={{ ...formStyles.label, marginBottom: 0, whiteSpace: 'nowrap' }}>{children}</span>
+      {done && (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700, color: '#0B8B43', textTransform: 'none', letterSpacing: 0 }}>
+          <svg width="15" height="15" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8" fill="#0B8B43"/><path d="M4.5 8.3 L7 10.8 L11.6 5.5" stroke="#fff" strokeWidth="1.7" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+          Verified
+        </span>
+      )}
+    </div>
+  );
+}
+
+function Seg({ active, onClick, color, title, sub }) {  return (
+    <button onClick={onClick} style={{ textAlign: 'left', padding: '13px 14px', borderRadius: 12,
+      border: `1.5px solid ${active ? color : LINE}`, background: active ? color : '#fff',
+      transition: 'all .15s' }}>
+      <div style={{ fontWeight: 700, fontSize: 14.5, color: active ? '#fff' : INK }}>{title}</div>
+      <div style={{ fontSize: 12, marginTop: 2, color: active ? 'rgba(255,255,255,0.85)' : FAINT }}>{sub}</div>
+    </button>
+  );
+}
+
+const btn = (bg) => ({ background: bg, color: '#fff', fontWeight: 700, fontSize: 15.5,
+  padding: '15px 22px', borderRadius: 12, letterSpacing: '0.01em' });
+
+
+function Shell({ children, setupOpen, setSetupOpen, configured }) {
+  return (
+    <div style={{ minHeight: '100vh', padding: '28px 18px 60px' }}>
+      <div style={{ maxWidth: 560, margin: '0 auto' }}>
+        {/* header */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 22 }}>
+          <Logo />
+          <span style={{ fontSize: 10.5, fontFamily: '"JetBrains Mono", monospace', letterSpacing: '0.14em',
+            color: FAINT }}>FIELD CAPTURE</span>
+        </div>
+
+        {/* title band */}
+        <div style={{ marginBottom: 20 }}>
+          <h1 style={{ margin: '0 0 5px', fontSize: 26, fontWeight: 800, letterSpacing: '-0.01em', color: NAVY }}>
+            Daily capture submission</h1>
+          <p style={{ margin: 0, color: MUTED, fontSize: 15, lineHeight: 1.5 }}>
+            End‑of‑day wrap‑up — your one stop to log the day. Files, what you captured, or a no‑fly day. Submit every day.</p>
+        </div>
+
+        {/* card */}
+        <div style={{ background: '#fff', borderRadius: 18, padding: '24px 22px',
+          boxShadow: '0 1px 2px rgba(10,31,92,0.05), 0 18px 44px -16px rgba(10,31,92,0.18)' }}>
+          {children}
+        </div>
+
+        {/* footer / setup */}
+        {setSetupOpen && (
+          <div style={{ marginTop: 18, textAlign: 'center' }}>
+            <button onClick={() => setSetupOpen(!setupOpen)}
+              style={{ fontSize: 12, color: FAINT, fontFamily: '"JetBrains Mono", monospace' }}>
+              {configured ? '● hosted submissions on' : '○ admin setup'} {setupOpen ? '▴' : '▾'}
+            </button>
+            {setupOpen && (
+              <div style={{ marginTop: 12, textAlign: 'left', background: '#fff', border: `1px solid ${LINE}`,
+                borderRadius: 12, padding: '16px 18px', fontSize: 13, color: MUTED, lineHeight: 1.6 }}>
+                <b style={{ color: NAVY }}>For the manager / admin</b>
+                <p style={{ margin: '8px 0 0' }}>
+                  {configured
+                    ? 'Hosted submissions are configured — files upload to your Supabase bucket and a row is written to your submissions table. Operators just fill this form.'
+                    : 'This form runs in download‑package mode: operators get a single .zip (their files + a submission.json) to send you, which the dashboard imports.'}
+                </p>
+                <p style={{ margin: '10px 0 0' }}>
+                  To make it a true hosted link, open this file and fill the <b>CONFIG</b> block at the top
+                  (Supabase URL + anon key + a public bucket + a <code>submissions</code> table), then host the file.
+                  Step‑by‑step is in the comment above CONFIG.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
+        <div style={{ textAlign: 'center', marginTop: 18, fontSize: 11.5, color: FAINT }}>
+          Arealytics · submissions are private to your team
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Mount.
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

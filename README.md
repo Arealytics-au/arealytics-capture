@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/28692757/README.md)
 # Arealytics — Daily Capture Submission (operator form)
 
 Public, self-serve form for field operators to submit their daily capture
