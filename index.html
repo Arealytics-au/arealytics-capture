@@ -75,16 +75,16 @@ window.DECRYPT_ENDPOINT = CONFIG.DECRYPT_ENDPOINT;   // flight-decoder.js reads 
 
 // Roster — operators self-identify. Matches the dashboard roster.
 const ROSTER = [
-  { id: 'op-marc',   name: 'Marc Margot',    city: 'Sydney',         state: 'NSW' },
-  { id: 'op-paul',   name: 'Paul McConnell', city: 'Sydney',         state: 'NSW' },
-  { id: 'op-lucas',  name: 'Lucas Moy',      city: 'Melbourne',      state: 'VIC' },
-  { id: 'op-jakob',  name: 'Jakob Kelly',    city: 'Melbourne',      state: 'VIC' },
-  { id: 'op-hunter', name: 'Hunter Pateidl', city: 'Brisbane',       state: 'QLD' },
-  { id: 'op-damien', name: 'Damien Poole',   city: 'Sunshine Coast', state: 'QLD' },
-  { id: 'op-alex',   name: 'Alex Ballard',   city: 'Gold Coast',     state: 'QLD' },
-  { id: 'op-joe',    name: 'Joe Arthey',     city: 'Perth',          state: 'WA'  },
-  { id: 'op-sam',    name: 'Sam',            city: 'Adelaide',       state: 'SA'  },
-  { id: 'op-justin', name: 'Justin',         city: 'Adelaide',       state: 'SA'  },
+  { id: 'op-marc',   name: 'Marc Margot' },
+  { id: 'op-paul',   name: 'Paul McConnell' },
+  { id: 'op-lucas',  name: 'Lucas Moy' },
+  { id: 'op-jakob',  name: 'Jakob Kelly' },
+  { id: 'op-hunter', name: 'Hunter Pateidl' },
+  { id: 'op-damien', name: 'Damien Poole' },
+  { id: 'op-alex',   name: 'Alex Ballard' },
+  { id: 'op-joe',    name: 'Joe Arthey' },
+  { id: 'op-sam',    name: 'Sam' },
+  { id: 'op-justin', name: 'Justin' },
 ];
 
 const NO_FLY_REASONS = [
@@ -223,7 +223,7 @@ function App() {
     setStatus('submitting'); setErrorMsg(''); setProgress('');
     const ref = makeRef();
     const meta = {
-      ref, operator: opName, op_id: opId, state: op ? op.state : '', city: op ? op.city : '',
+      ref, operator: opName, op_id: opId, state: '', city: '',
       capture_date: date, flew: flew === 'yes', reason: flew === 'no' ? reasonFinal : '',
       decoded: flew === 'yes' ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
         name: f.name, status: d.status || null, model: d.model || null, encrypted: !!d.encrypted,
@@ -377,7 +377,7 @@ function App() {
           <select className="ar-field" style={formStyles.field} value={opId}
             onChange={(e) => setOpId(e.target.value)}>
             <option value="">Select your name…</option>
-            {ROSTER.map(o => <option key={o.id} value={o.id}>{o.name} — {o.city}, {o.state}</option>)}
+            {ROSTER.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
             <option value="other">Other / not listed…</option>
           </select>
           {opId === 'other' && (
