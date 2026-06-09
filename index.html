@@ -155,7 +155,7 @@ function App() {
   const decErr = decList.filter(d => d.status === 'error').length;
   const decSec = decList.reduce((a, d) => a + (d.durationSec || 0), 0);
   const decodedNote = decList.length
-    ? `  ·  ${decOk} decoded${decEnc ? ` · ${decEnc} server‑side` : ''}${decErr ? ` · ${decErr} unreadable` : ''}${decSec ? ` · ${Math.round(decSec / 60)} min total` : ''}`
+    ? `  ·  ${decOk + decEnc} flight ${(decOk + decEnc) === 1 ? 'log' : 'logs'} ready${decErr ? ` · ${decErr} empty skipped` : ''}${decSec ? ` · ${Math.round(decSec / 60)} min flown` : ''}` : ''}`
     : '';
 
   // ---- per-field completion (drives the ticks + the submit gate) ----
@@ -443,8 +443,8 @@ function App() {
                       <div style={{ marginTop: 6, fontSize: 12, fontFamily: '"JetBrains Mono", monospace', display: 'flex', alignItems: 'center', gap: 6 }}>
                         {dec.status === 'decoding' && <span style={{ color: FAINT }}>Decoding…</span>}
                         {dec.status === 'ok' && <span style={{ color: '#0B8B43' }}>✓ {dec.model || 'DJI'}{mins ? ` · ${mins}` : ''} · {(dec.samples || 0).toLocaleString()} pts</span>}
-                        {dec.status === 'encrypted' && <span style={{ color: NAVY }}>● {dec.model || 'DJI log'} · encrypted — decodes server‑side</span>}
-                        {dec.status === 'error' && <span style={{ color: '#C4452C' }}>Couldn’t read — {dec.error}</span>}
+                        {dec.status === 'encrypted' && <span style={{ color: '#0B8B43' }}>✓ {dec.model || 'Flight log'} · ready · will be processed after upload</span>}
+                        {dec.status === 'error' && <span style={{ color: MUTED }}>⏭ Skipped — {dec.error}</span>}
                       </div>
                     </div>
                   );

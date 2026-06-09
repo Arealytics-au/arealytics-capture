@@ -100,7 +100,7 @@
   }
   function decodeTXT(buf, name) {
     const u8 = new Uint8Array(buf), dv = new DataView(buf);
-    if (u8.length < 100) return { ok: false, kind: 'TXT', name, error: 'File too small to be a DJI log' };
+    if (u8.length < 100) return { ok: false, kind: 'TXT', name, error: 'empty file — no flight data' };
     const detailOffset = Number(dv.getBigUint64(0, true));
     const recStart = 12;
     const recEnd = (detailOffset > recStart && detailOffset <= u8.length) ? detailOffset : u8.length;
@@ -131,7 +131,7 @@
     if (osd.length < 10) {
       // Encrypted modern DJI Fly / Pilot 2 log \u2014 keys are server-side.
       return { ok: true, kind: 'TXT', name, encrypted: true, model, serial,
-        note: 'Encrypted DJI log \u2014 telemetry decodes server-side; the file is still captured.' };
+        note: 'Encrypted DJI log \u2014 telemetry is processed after upload.' };
     }
     const HZ = 10;
     return summarise(osd, {
