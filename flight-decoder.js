@@ -186,10 +186,58 @@
     return head + cols + '\n' + lines.join('\n') + '\n';
   }
 
-  async function decode(file) {
+  /* ---- Matrice 4E video \u2192 telemetry (streamed in-browser; the video itself is NEVER
+     uploaded or stored \u2014 only the recovered telemetry text leaves this function). The M4E
+     (DJI Pilot 2) embeds per-frame telemetry as a subtitle stream inside the .MP4 instead
+     of writing a sidecar .SRT, so we stream the file in chunks and scrape the frames. ---- */
+  async function extractM4eSrt(file, onProgress) {
+    const M4E_BLOCK = /FrameCnt: \d+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+[\s\S]{0,500}?abs_alt: [-0-9.]+\]/g;
+    const M4E_TS = /(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)/;
+    const CHUNK = 16 * 1024 * 1024, OVER = 8192, dec = new TextDecoder('latin1');
+    // V8 substring slices RETAIN their parent string: without a hard copy every matched
+    // block pins its whole ~32 MB chunk, so a multi-GB video OOMs the tab. Copy hard.
+    const te = new TextEncoder(), td = new TextDecoder();
+    const hardCopy = (s) => td.decode(te.encode(s));
+    let tail = '', blocks = [], seen = new Set();
+    for (let pos = 0; pos < file.size; pos += CHUNK) {
+      const end = Math.min(file.size, pos + CHUNK);
+      const text = tail + dec.decode(new Uint8Array(await file.slice(pos, end).arrayBuffer()));
+      M4E_BLOCK.lastIndex = 0; let m;
+      while ((m = M4E_BLOCK.exec(text))) {
+        const g = m[0], fc = (g.match(/FrameCnt: (\d+)/) || [])[1];
+        if (fc == null || seen.has(fc)) continue;
+        seen.add(fc); blocks.push(hardCopy(g.trim()));
+      }
+      tail = hardCopy(text.slice(-OVER));
+      if (onProgress) onProgress(Math.round(end / file.size * 100));
+      await new Promise(r => setTimeout(r, 0));   // yield so the UI repaints
+    }
+    const parsed = [];
+    for (const b of blocks) { const mm = b.match(M4E_TS); if (mm) parsed.push([Date.parse(mm[1].replace(' ', 'T')), b]); }
+    if (parsed.length < 2) return null;
+    const t0 = parsed[0][0], pad = (n, w) => String(n).padStart(w, '0');
+    const tc = (ms) => { let s = Math.max(0, (ms - t0) / 1000); return `${pad(Math.floor(s / 3600), 2)}:${pad(Math.floor(s % 3600 / 60), 2)}:${pad(Math.floor(s % 60), 2)},${pad(Math.round((s - Math.floor(s)) * 1000), 3)}`; };
+    let out = '';
+    for (let i = 0; i < parsed.length; i++) {
+      const nt = i + 1 < parsed.length ? parsed[i + 1][0] : parsed[i][0] + 33;
+      out += `${i + 1}\n${tc(parsed[i][0])} --> ${tc(nt)}\n${parsed[i][1]}\n\n`;
+    }
+    return out;
+  }
+
+  async function decode(file, onProgress) {
     const lower = (file.name || '').toLowerCase();
     try {
       if (lower.endsWith('.srt')) return decodeSRT(await file.text(), file.name);
+      if (lower.endsWith('.mp4') || lower.endsWith('.mov')) {
+        const srt = await extractM4eSrt(file, onProgress);
+        if (!srt) return { ok: false, kind: 'M4E', name: file.name, error: 'No embedded telemetry in this video \u2014 only Matrice 4E videos carry it' };
+        const res = decodeSRT(srt, file.name);
+        if (!res.ok) return Object.assign(res, { kind: 'M4E' });
+        // Only the M4E embeds telemetry in video, so the model is known (fnum-based
+        // detection would misread the M4E's bright lens as an Air 3S).
+        return Object.assign(res, { kind: 'M4E', model: 'Matrice 4E', extractedSrt: srt });
+      }
       if (lower.endsWith('.txt')) {
         const res = decodeTXT(await file.arrayBuffer(), file.name);
         // Encrypted modern log + a decrypt service configured \u2192 decode there into CSV.
