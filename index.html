@@ -155,7 +155,7 @@ function App() {
   const decErr = decList.filter(d => d.status === 'error').length;
   const decSec = decList.reduce((a, d) => a + (d.durationSec || 0), 0);
   const decodedNote = decList.length
-    ? `  ·  ${decOk + decEnc} flight ${(decOk + decEnc) === 1 ? 'log' : 'logs'} ready${decErr ? ` · ${decErr} empty skipped` : ''}${decSec ? ` · ${Math.round(decSec / 60)} min flown` : ''}` : ''}`
+    ? `  ·  ${decOk + decEnc} flight ${(decOk + decEnc) === 1 ? 'log' : 'logs'} ready${decErr ? ` · ${decErr} empty skipped` : ''}${decSec ? ` · ${Math.round(decSec / 60)} min flown` : ''}`
     : '';
 
   // ---- per-field completion (drives the ticks + the submit gate) ----
