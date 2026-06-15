@@ -140,6 +140,10 @@ function App() {
   const [result, setResult] = useState(null);    // { ref, mode }
   const [setupOpen, setSetupOpen] = useState(false);
   const fileRef = useRef(null);
+  // Damien only: a writable handle to the folder his M4E videos were dragged from (his SD card),
+  // so the in-browser-extracted SRTs can be written straight back next to the source videos.
+  const srtDirRef = useRef(null);
+  const [srtSaved, setSrtSaved] = useState('');   // status line for the write-back
 
   const driveOn = !!CONFIG.DRIVE_ENDPOINT;
   const configured = driveOn || !!(CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY);
@@ -204,6 +208,46 @@ function App() {
   };
   const csvName = (name) => name.replace(/\.(srt|txt|mp4|mov)$/i, '') + '.csv';
 
+  // ---- Damien only: write the extracted M4E SRTs back next to the source videos (his SD card) ----
+  const isDamien = opId === 'op-damien';
+  // Pull a dropped FOLDER's flight files into the form, and remember the folder so the SRTs
+  // can be written straight back into it (Chromium File System Access).
+  const addFilesFromDir = async (dir) => {
+    const out = [];
+    try { for await (const e of dir.values()) { if (e.kind === 'file' && okFile(e.name)) out.push(await e.getFile()); } }
+    catch (_) {}
+    if (out.length) addFiles(out);
+  };
+  // The SRTs we extracted in-browser from this submission's M4E videos.
+  const extractedSrts = () => files.map(f => {
+    const d = decoded[fkey(f)] || {};
+    return d.extractedSrt ? { name: f.name.replace(/\.(mp4|mov)$/i, '.srt'), text: d.extractedSrt } : null;
+  }).filter(Boolean);
+  const saveSrtsToCard = async () => {
+    const srts = extractedSrts();
+    if (!srts.length) return;
+    let dir = srtDirRef.current;
+    try {
+      if (!dir) {
+        if (!window.showDirectoryPicker) { setSrtSaved('Use Chrome or Edge to save SRTs back to the card.'); return; }
+        dir = await window.showDirectoryPicker({ id: 'arealytics-m4e-srt', mode: 'readwrite' });
+        srtDirRef.current = dir;
+      }
+      if (dir.requestPermission && (await dir.requestPermission({ mode: 'readwrite' })) !== 'granted') {
+        setSrtSaved('Folder write permission was declined.'); return;
+      }
+      let n = 0;
+      for (const s of srts) {
+        const fh = await dir.getFileHandle(s.name, { create: true });
+        const w = await fh.createWritable(); await w.write(s.text); await w.close(); n++;
+      }
+      setSrtSaved('✓ ' + n + ' SRT' + (n === 1 ? '' : 's') + ' saved to “' + (dir.name || 'your folder') + '”.');
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;   // user closed the folder picker — fine
+      setSrtSaved('Couldn’t write the SRTs to the card: ' + (e && e.message ? e.message : e));
+    }
+  };
+
   // validation
   const errors = [];
   if (!nameDone) errors.push('Select your name.');
@@ -240,6 +284,9 @@ function App() {
       else await submitBundle(meta);
       setResult({ ref, mode: driveOn ? 'drive' : (configured ? 'hosted' : 'bundle') });
       setStatus('done');
+      // Damien: if he dropped the card's folder, write the SRTs straight back into it now —
+      // we already hold a writable handle, so no extra prompt. (File-drops use the button instead.)
+      if (isDamien && srtDirRef.current && extractedSrts().length) saveSrtsToCard();
     } catch (e) {
       setErrorMsg(String(e && e.message ? e.message : e));
       setStatus('error');
@@ -375,6 +422,17 @@ function App() {
               Saved to your <b>Arealytics Drive folder</b> — it syncs to the dashboard automatically.
             </p>
           )}
+          {/* Damien only: keep a local SRT copy on the source card. Auto-done if he dropped the
+              folder; otherwise one tap to point at the card. Invisible to every other operator. */}
+          {isDamien && extractedSrts().length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              {srtSaved
+                ? <p style={{ margin: 0, fontSize: 13.5, color: srtSaved[0] === '✓' ? '#0B8B43' : ORANGE }}>{srtSaved}</p>
+                : <button onClick={saveSrtsToCard} style={{ ...btn(NAVY), minWidth: 220 }}>
+                    💾 Save {extractedSrts().length} SRT{extractedSrts().length === 1 ? '' : 's'} back to my SD card
+                  </button>}
+            </div>
+          )}
           <div style={{ marginTop: 26 }}>
             <button onClick={reset} style={{ ...btn(ORANGE), minWidth: 200 }}>Submit another day</button>
           </div>
@@ -426,7 +484,17 @@ function App() {
             <div onClick={() => fileRef.current && fileRef.current.click()}
               onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
               onDragLeave={() => setDrag(false)}
-              onDrop={(e) => { e.preventDefault(); setDrag(false); addFiles(e.dataTransfer.files); }}
+              onDrop={(e) => {
+                e.preventDefault(); setDrag(false);
+                const dt = e.dataTransfer, dropped = dt.files;   // capture now — DataTransfer is cleared after this handler
+                // Damien only: if a FOLDER is dropped, keep its handle so the extracted SRTs go
+                // straight back into it (exactly where the videos came from). Chromium only.
+                if (isDamien && dt.items && dt.items.length && dt.items[0].getAsFileSystemHandle) {
+                  Promise.all(Array.from(dt.items).map(it => it.getAsFileSystemHandle ? it.getAsFileSystemHandle() : null).filter(Boolean))
+                    .then(hs => { const d = hs.find(h => h && h.kind === 'directory'); if (d) { srtDirRef.current = d; addFilesFromDir(d); } else addFiles(dropped); })
+                    .catch(() => addFiles(dropped));
+                } else { addFiles(dropped); }
+              }}
               style={{ border: `1.5px dashed ${drag ? NAVY : '#C7CCD9'}`, borderRadius: 13,
                 background: drag ? 'rgba(10,31,92,0.04)' : '#fff', padding: '22px 18px', cursor: 'pointer',
                 textAlign: 'center', transition: 'all .15s' }}>
@@ -437,6 +505,11 @@ function App() {
                 <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" strokeLinecap="round"/></svg>
               <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>Drop your <b>.SRT</b> & <b>.TXT</b> files — Matrice 4E pilots drop the <b>.MP4</b> too</div>
               <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>or tap to browse — one set per flight. Videos are read in place: only the flight telemetry uploads, never the video.</div>
+              {isDamien && (
+                <div style={{ fontSize: 12.5, color: NAVY, marginTop: 6, fontWeight: 600 }}>
+                  Tip: drag the whole <b>card video folder</b> in and your SRTs are written straight back into it. Dropping files instead? Use the “save to SD card” button after you submit.
+                </div>
+              )}
             </div>
             {files.length > 0 && (
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 7 }}>
