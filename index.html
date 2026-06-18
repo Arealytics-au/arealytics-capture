@@ -88,7 +88,7 @@ const ROSTER = [
 ];
 
 const NO_FLY_REASONS = [
-  'Rain', 'Storms', 'High wind', 'Low cloud / poor light', 'Fog',
+  'RePL study', 'Rain', 'Storms', 'High wind', 'Low cloud / poor light', 'Fog',
   'Equipment fault', 'CASA / permit hold', 'Site access', 'Other',
 ];
 
@@ -309,34 +309,64 @@ function App() {
     if (j && j.ok === false) throw new Error(j.error || 'Drive upload failed');
     return j || { ok: true };
   }
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  // Retry one upload a few times with backoff. SAFE to retry: the Apps Script de-dupes by filename
+  // (removeExisting), so a re-sent file replaces rather than stacks. Throws only after all tries fail.
+  async function postDriveRetry(payload, tries) {
+    tries = tries || 3;
+    let lastErr;
+    for (let attempt = 1; attempt <= tries; attempt++) {
+      try { return await postDrive(payload); }
+      catch (e) { lastErr = e; if (attempt < tries) await sleep(700 * attempt); }
+    }
+    throw lastErr;
+  }
   async function submitDrive(meta) {
+    // RESILIENT upload: each file is uploaded independently with retry, and one file failing NEVER
+    // aborts the rest (the old loop threw on the first failure, silently abandoning every file after
+    // it — that's how a transient hiccup lost 6 of 10 flights). We collect failures and report exactly
+    // which flights didn't make it so the operator can re-send them (re-sends are de-duped server-side).
+    const failed = [];
     if (meta.flew) {
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         setProgress(`Uploading ${i + 1} / ${files.length} · ${f.name}`);
-        const dec = decoded[fkey(f)] || {};
-        if (dec.extractedSrt) {
-          // M4E video: telemetry was extracted in-browser — upload ONLY that (a few MB).
-          // The multi-GB video never leaves this machine.
-          await postDrive({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
-            name: f.name.replace(/\.(mp4|mov)$/i, '.srt'), mimeType: 'application/x-subrip',
-            dataB64: btoa(unescape(encodeURIComponent(dec.extractedSrt))) });
-        } else {
-          const dataB64 = await fileToB64(f);
-          await postDrive({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
-            name: f.name, mimeType: f.type || 'application/octet-stream', dataB64 });
+        try {
+          const dec = decoded[fkey(f)] || {};
+          if (dec.extractedSrt) {
+            // M4E video: telemetry was extracted in-browser — upload ONLY that (a few MB).
+            // The multi-GB video never leaves this machine.
+            await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+              name: f.name.replace(/\.(mp4|mov)$/i, '.srt'), mimeType: 'application/x-subrip',
+              dataB64: btoa(unescape(encodeURIComponent(dec.extractedSrt))) });
+          } else {
+            const dataB64 = await fileToB64(f);
+            await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+              name: f.name, mimeType: f.type || 'application/octet-stream', dataB64 });
+          }
+          // save the decoded CSV alongside the raw file when we have telemetry
+          const csv = csvFor(f);
+          if (csv) {
+            await postDriveRetry({ operator: meta.operator, date: meta.capture_date, name: csvName(f.name),
+              mimeType: 'text/csv', dataB64: btoa(unescape(encodeURIComponent(csv))) });
+          }
+        } catch (e) {
+          failed.push(f.name);                 // record + keep going — do NOT abort the batch
         }
-        // save the decoded CSV alongside the raw file when we have telemetry
-        const csv = csvFor(f);
-        if (csv) {
-          await postDrive({ operator: meta.operator, date: meta.capture_date, name: csvName(f.name),
-            mimeType: 'text/csv', dataB64: btoa(unescape(encodeURIComponent(csv))) });
-        }
+        await sleep(250);                        // gentle pacing so a burst of POSTs doesn't get throttled
       }
     }
     setProgress('Recording submission…');
-    await postDrive({ action: 'manifest', operator: meta.operator, op_id: meta.op_id,
-      date: meta.capture_date, ref: meta.ref, meta });
+    try {
+      await postDriveRetry({ action: 'manifest', operator: meta.operator, op_id: meta.op_id,
+        date: meta.capture_date, ref: meta.ref, meta: { ...meta, failed } });
+    } catch (e) { /* manifest is just the day summary — never let it mask the file results */ }
+    if (failed.length) {
+      const ok = files.length - failed.length;
+      const err = new Error(`${ok}/${files.length} files uploaded. ${failed.length} could not be sent: ${failed.join(', ')}. Tap Submit again to re-send the missing ones (already-uploaded files are skipped).`);
+      err.failed = failed;
+      throw err;                                 // surfaced on the error screen with the exact missing files
+    }
   }
 
   async function submitSupabase(meta) {
