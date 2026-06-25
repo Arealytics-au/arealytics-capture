@@ -223,13 +223,27 @@ function App() {
     const d = decoded[fkey(f)] || {};
     return d.extractedSrt ? { name: f.name.replace(/\.(mp4|mov)$/i, '.srt'), text: d.extractedSrt } : null;
   }).filter(Boolean);
+  // Download the extracted SRTs as files — always works, including inside an embedded (cross-origin) frame
+  // where the folder picker is blocked, and in browsers without the File System Access API.
+  const downloadSrts = (srts) => {
+    for (const s of srts) {
+      const url = URL.createObjectURL(new Blob([s.text], { type: 'application/x-subrip' }));
+      const a = document.createElement('a');
+      a.href = url; a.download = s.name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+    setSrtSaved('✓ ' + srts.length + ' SRT' + (srts.length === 1 ? '' : 's') + ' downloaded — check your Downloads folder.');
+  };
   const saveSrtsToCard = async () => {
     const srts = extractedSrts();
     if (!srts.length) return;
+    // A folder/file picker can't open inside an embedded (cross-origin) frame — when the form runs inside the
+    // dashboard's "LOG A CAPTURE" overlay, just download the SRTs instead. A standalone tab still writes the
+    // files straight back into the folder you pick (the original behaviour).
+    if (window.self !== window.top || !window.showDirectoryPicker) { downloadSrts(srts); return; }
     let dir = srtDirRef.current;
     try {
       if (!dir) {
-        if (!window.showDirectoryPicker) { setSrtSaved('Use Chrome or Edge to save SRTs back to the card.'); return; }
         dir = await window.showDirectoryPicker({ id: 'arealytics-m4e-srt', mode: 'readwrite' });
         srtDirRef.current = dir;
       }
@@ -244,7 +258,7 @@ function App() {
       setSrtSaved('✓ ' + n + ' SRT' + (n === 1 ? '' : 's') + ' saved to “' + (dir.name || 'your folder') + '”.');
     } catch (e) {
       if (e && e.name === 'AbortError') return;   // user closed the folder picker — fine
-      setSrtSaved('Couldn’t write the SRTs to the card: ' + (e && e.message ? e.message : e));
+      downloadSrts(srts);                          // blocked / unsupported → download instead, never lose them
     }
   };
 
