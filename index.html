@@ -210,6 +210,9 @@ function App() {
 
   // ---- Damien only: write the extracted M4E SRTs back next to the source videos (his SD card) ----
   const isDamien = opId === 'op-damien';
+  // Running inside the dashboard's overlay (cross-origin iframe)? The folder-write API is blocked there,
+  // so the card write-back can't work — we download instead, and the UI says so honestly.
+  const isEmbedded = window.self !== window.top;
   // Pull a dropped FOLDER's flight files into the form, and remember the folder so the SRTs
   // can be written straight back into it (Chromium File System Access).
   const addFilesFromDir = async (dir) => {
@@ -223,16 +226,34 @@ function App() {
     const d = decoded[fkey(f)] || {};
     return d.extractedSrt ? { name: f.name.replace(/\.(mp4|mov)$/i, '.srt'), text: d.extractedSrt } : null;
   }).filter(Boolean);
-  // Download the extracted SRTs as files — always works, including inside an embedded (cross-origin) frame
-  // where the folder picker is blocked, and in browsers without the File System Access API.
-  const downloadSrts = (srts) => {
-    for (const s of srts) {
-      const url = URL.createObjectURL(new Blob([s.text], { type: 'application/x-subrip' }));
+  // Download the extracted SRTs — the fallback when the card can't be written directly (embedded frame or
+  // no File System Access API). Firing one download per file makes the browser throttle/silently DROP part
+  // of a burst (that's how 16 became 10), so bundle 2+ into ONE .zip — a single download can't be partially
+  // lost — and report the REAL count, never the attempted count.
+  const downloadSrts = async (srts) => {
+    if (!srts.length) return;
+    try {
+      if (srts.length === 1) {
+        const s = srts[0];
+        const url = URL.createObjectURL(new Blob([s.text], { type: 'application/x-subrip' }));
+        const a = document.createElement('a');
+        a.href = url; a.download = s.name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+        setSrtSaved('✓ 1 SRT downloaded — check your Downloads folder.');
+        return;
+      }
+      const zip = new window.JSZip();
+      for (const s of srts) zip.file(s.name, s.text);
+      const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+      const zipName = 'Arealytics_' + (date || todayISO()) + '_SRTs.zip';
       const a = document.createElement('a');
-      a.href = url; a.download = s.name; document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      a.href = URL.createObjectURL(blob); a.download = zipName;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 8000);
+      setSrtSaved('✓ All ' + srts.length + ' SRTs downloaded as ' + zipName + ' — unzip them into your card folder.');
+    } catch (e) {
+      setSrtSaved('Could not package the SRTs (' + ((e && e.message) || e) + '). Try “Open in browser”.');
     }
-    setSrtSaved('✓ ' + srts.length + ' SRT' + (srts.length === 1 ? '' : 's') + ' downloaded — check your Downloads folder.');
   };
   const saveSrtsToCard = async () => {
     const srts = extractedSrts();
@@ -240,7 +261,7 @@ function App() {
     // A folder/file picker can't open inside an embedded (cross-origin) frame — when the form runs inside the
     // dashboard's "LOG A CAPTURE" overlay, just download the SRTs instead. A standalone tab still writes the
     // files straight back into the folder you pick (the original behaviour).
-    if (window.self !== window.top || !window.showDirectoryPicker) { downloadSrts(srts); return; }
+    if (window.self !== window.top || !window.showDirectoryPicker) { await downloadSrts(srts); return; }
     let dir = srtDirRef.current;
     try {
       if (!dir) {
@@ -258,7 +279,7 @@ function App() {
       setSrtSaved('✓ ' + n + ' SRT' + (n === 1 ? '' : 's') + ' saved to “' + (dir.name || 'your folder') + '”.');
     } catch (e) {
       if (e && e.name === 'AbortError') return;   // user closed the folder picker — fine
-      downloadSrts(srts);                          // blocked / unsupported → download instead, never lose them
+      await downloadSrts(srts);                    // blocked / unsupported → download instead, never lose them
     }
   };
 
@@ -473,8 +494,16 @@ function App() {
               {srtSaved
                 ? <p style={{ margin: 0, fontSize: 13.5, color: srtSaved[0] === '✓' ? '#0B8B43' : ORANGE }}>{srtSaved}</p>
                 : <button onClick={saveSrtsToCard} style={{ ...btn(NAVY), minWidth: 220 }}>
-                    💾 Save {extractedSrts().length} SRT{extractedSrts().length === 1 ? '' : 's'} back to my SD card
+                    {isEmbedded
+                      ? '⬇︎ Download ' + extractedSrts().length + ' SRT' + (extractedSrts().length === 1 ? '' : 's') + ' (.zip)'
+                      : '💾 Save ' + extractedSrts().length + ' SRT' + (extractedSrts().length === 1 ? '' : 's') + ' back to my SD card'}
                   </button>}
+              {isEmbedded && !srtSaved && (
+                <p style={{ margin: '8px auto 0', fontSize: 12, color: MUTED, maxWidth: 380, lineHeight: 1.5 }}>
+                  In the embedded form the browser can’t write to your card, so this downloads one .zip (all files, none dropped).
+                  To write the SRTs <b>straight onto the card</b>, use <b>Open in browser</b> and drag the whole card folder in.
+                </p>
+              )}
             </div>
           )}
           <div style={{ marginTop: 26 }}>
