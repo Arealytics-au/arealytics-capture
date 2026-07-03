@@ -87,8 +87,10 @@ const ROSTER = [
   { id: 'op-justin', name: 'Justin' },
 ];
 
+// Why a NON-FLYING, NON-STUDY, NON-OFF day happened. RePL study + Day off are now their own
+// day-types (first-class buttons), so they're intentionally not in this weather/blocker list.
 const NO_FLY_REASONS = [
-  'RePL study', 'Rain', 'Storms', 'High wind', 'Low cloud / poor light', 'Fog',
+  'Rain', 'Storms', 'High wind', 'Low cloud / poor light', 'Fog',
   'Equipment fault', 'CASA / permit hold', 'Site access', 'Other',
 ];
 
@@ -126,20 +128,28 @@ function App() {
   const [opId, setOpId] = useState('');
   const [otherName, setOtherName] = useState('');
   const [date, setDate] = useState(todayISO());
-  const [flew, setFlew] = useState('yes');      // 'yes' | 'no'
-  const [reason, setReason] = useState('');
+  // The day-type is the ONE required choice each day — it maps 1:1 to the reporting categories
+  // (flew / weather-or-blocked / day off / RePL study). Replaces the old flew yes/no.
+  const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'off' | 'repl'
+  const [reason, setReason] = useState('');       // weather / blocker reason (when nofly)
   const [reasonOther, setReasonOther] = useState('');
+  const [coverImg, setCoverImg] = useState(null); // File — screenshot of today's flown area (marked/coloured)
+  const [coverUrl, setCoverUrl] = useState('');   // object URL for the preview thumbnail
+  const [propCount, setPropCount] = useState(''); // properties captured today (self-reported, aids reconciliation)
+  const [area, setArea] = useState('');           // suburb / area flown (free text)
   const [files, setFiles] = useState([]);        // File[]
   const [decoded, setDecoded] = useState({});    // fkey -> { status, ...summary }
   const [dateTouched, setDateTouched] = useState(false);
   const [notes, setNotes] = useState('');
   const [drag, setDrag] = useState(false);
+  const [coverDrag, setCoverDrag] = useState(false);   // drag state for the coverage-image dropzone
   const [status, setStatus] = useState('idle');  // idle | submitting | done | error
   const [progress, setProgress] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [result, setResult] = useState(null);    // { ref, mode }
   const [setupOpen, setSetupOpen] = useState(false);
   const fileRef = useRef(null);
+  const coverRef = useRef(null);   // hidden <input type=file> for the coverage screenshot
   // Damien only: a writable handle to the folder his M4E videos were dragged from (his SD card),
   // so the in-browser-extracted SRTs can be written straight back next to the source videos.
   const srtDirRef = useRef(null);
@@ -166,11 +176,12 @@ function App() {
   const decStates = files.map(f => decoded[fkey(f)] || { status: 'decoding' });
   const anyDecoding = decStates.some(d => d.status === 'decoding');
   const anyError = decStates.some(d => d.status === 'error');
+  const didFly = dayType === 'flew';
   const nameDone = !!opName;
   const dateDone = !!date;
-  const filesDone = flew === 'yes' && files.length > 0 && !anyDecoding && !anyError
+  const filesDone = didFly && files.length > 0 && !anyDecoding && !anyError
     && decStates.every(d => d.status === 'ok' || d.status === 'encrypted');
-  const reasonDone = flew === 'no' && !!reason && (reason !== 'Other' || !!reasonOther.trim());
+  const reasonDone = dayType === 'nofly' && !!reason && (reason !== 'Other' || !!reasonOther.trim());
 
   const addFiles = (list) => {
     const incoming = Array.from(list || []).filter(f => okFile(f.name));
@@ -196,6 +207,28 @@ function App() {
     const f = files[i];
     setFiles(prev => prev.filter((_, j) => j !== i));
     if (f) setDecoded(d => { const n = { ...d }; delete n[fkey(f)]; return n; });
+  };
+
+  // Coverage screenshot — the pilot's marked/coloured picture of the area they flew today.
+  // Just an image; stored alongside the flight files so management can see WHAT was covered.
+  const setCover = (list) => {
+    const img = Array.from(list || []).find(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|heic|gif)$/i.test(f.name));
+    if (!img) return;
+    if (coverUrl) { try { URL.revokeObjectURL(coverUrl); } catch (e) {} }
+    setCoverImg(img);
+    setCoverUrl(URL.createObjectURL(img));
+  };
+  const clearCover = () => {
+    if (coverUrl) { try { URL.revokeObjectURL(coverUrl); } catch (e) {} }
+    setCoverImg(null); setCoverUrl('');
+    if (coverRef.current) coverRef.current.value = '';
+  };
+  // Name the coverage image so it sorts next to the day's flights in the operator's date folder.
+  const coverName = () => {
+    const m = coverImg && /\.([a-z0-9]+)$/i.exec(coverImg.name);
+    let ext = m ? m[1].toLowerCase() : 'png';
+    if (ext === 'jpeg') ext = 'jpg';
+    return `coverage-${date}.${ext}`;
   };
 
   // The decoded CSV for a file (SRT / legacy TXT built in-browser; encrypted TXT already CSV
@@ -287,13 +320,15 @@ function App() {
   const errors = [];
   if (!nameDone) errors.push('Select your name.');
   if (!dateDone) errors.push('Choose the capture date.');
-  if (flew === 'yes') {
-    if (files.length === 0) errors.push('Upload the day’s .SRT / .TXT files (M4E: drop the .MP4 videos) — or switch to “Couldn’t fly”.');
+  if (didFly) {
+    if (files.length === 0) errors.push('Upload the day’s .SRT / .TXT files (M4E: drop the .MP4 videos) — or pick a non-flying day above.');
     else if (anyDecoding) errors.push('Checking your files… one moment.');
     else if (anyError) errors.push('Remove the file(s) that couldn’t be read, then add the correct ones.');
+    // Coverage screenshot is REQUIRED on a flying day — it's the visual record of the area flown.
+    if (!coverImg) errors.push('Add a coverage screenshot of the area you flew (marked & coloured).');
   }
-  if (flew === 'no' && !reason) errors.push('Pick why you couldn\u2019t fly.');
-  if (flew === 'no' && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
+  if (dayType === 'nofly' && !reason) errors.push('Pick why you couldn\u2019t fly.');
+  if (dayType === 'nofly' && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
   const reasonFinal = reason === 'Other' ? (reasonOther.trim() || 'Other') : reason;
   const canSubmit = errors.length === 0 && status !== 'submitting';
 
@@ -305,8 +340,15 @@ function App() {
     const ref = makeRef();
     const meta = {
       ref, operator: opName, op_id: opId, state: '', city: '',
-      capture_date: date, flew: flew === 'yes', reason: flew === 'no' ? reasonFinal : '',
-      decoded: flew === 'yes' ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
+      capture_date: date,
+      // day_type is the reporting-friendly category; `flew` is kept as a derived boolean so the
+      // existing dashboard ingest (which reads meta.flew) keeps working unchanged.
+      day_type: dayType, flew: didFly,
+      reason: dayType === 'nofly' ? reasonFinal : '',
+      prop_count: didFly && propCount !== '' ? (Number(propCount) || 0) : 0,
+      area_flown: didFly ? area.trim() : '',
+      coverage_image: (didFly && coverImg) ? coverName() : '',
+      decoded: didFly ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
         name: f.name, status: d.status || null, model: d.model || null, encrypted: !!d.encrypted,
         decrypted: !!d.decrypted, durationSec: d.durationSec || 0, samples: d.samples || 0,
         distanceM: d.distanceM || 0, maxAltM: d.maxAltM || 0, dateISO: d.dateISO || null,
@@ -391,6 +433,16 @@ function App() {
         await sleep(250);                        // gentle pacing so a burst of POSTs doesn't get throttled
       }
     }
+    // Coverage screenshot (the pilot's marked/coloured picture of what they flew). Supplementary —
+    // a failure here must NOT fail the day's submission, so it's caught and recorded in `failed`.
+    if (meta.flew && coverImg && meta.coverage_image) {
+      setProgress('Uploading coverage screenshot…');
+      try {
+        const dataB64 = await fileToB64(coverImg);
+        await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+          name: meta.coverage_image, mimeType: coverImg.type || 'image/png', dataB64 });
+      } catch (e) { failed.push(meta.coverage_image); }
+    }
     setProgress('Recording submission…');
     try {
       await postDriveRetry({ action: 'manifest', operator: meta.operator, op_id: meta.op_id,
@@ -432,6 +484,12 @@ function App() {
       }
       stored.push(rec);
     }
+    // Coverage screenshot alongside the day's files.
+    if (meta.flew && coverImg && meta.coverage_image) {
+      const ipath = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(meta.coverage_image)}`;
+      const up = await sb.storage.from(CONFIG.BUCKET).upload(ipath, coverImg, { upsert: false });
+      if (!up.error) stored.push({ name: meta.coverage_image, size: coverImg.size, path: ipath, kind: 'coverage' });
+    }
     setProgress('Recording submission\u2026');
     const { error: insErr } = await sb.from(CONFIG.TABLE).insert([{ ...meta, files: stored }]);
     if (insErr) throw new Error('Could not record the submission: ' + insErr.message);
@@ -446,6 +504,8 @@ function App() {
     // decoded CSVs alongside the raw files
     const csvFolder = zip.folder('decoded-csv');
     for (const f of files) { const csv = csvFor(f); if (csv) csvFolder.file(csvName(f.name), csv); }
+    // coverage screenshot
+    if (meta.flew && coverImg && meta.coverage_image) zip.file(meta.coverage_image, coverImg);
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -455,7 +515,8 @@ function App() {
   }
 
   const reset = () => {
-    setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setFlew('yes');
+    setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setDayType('flew');
+    clearCover(); setPropCount(''); setArea('');
     setDateTouched(false);
     setStatus('idle'); setResult(null); setProgress(''); setDate(todayISO());
   };
@@ -539,19 +600,23 @@ function App() {
           <div style={formStyles.hint}>{prettyDate(date)}</div>
         </div>
 
-        {/* flew? segmented */}
+        {/* day type — the one required choice each day; maps 1:1 to the reporting categories */}
         <div>
-          <label style={formStyles.label}>Did you capture today?</label>
+          <label style={formStyles.label}>What kind of day was it?</label>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <Seg active={flew === 'yes'} onClick={() => setFlew('yes')} color="#0B8B43"
-              title="Yes — captured" sub="Upload the day’s files" />
-            <Seg active={flew === 'no'} onClick={() => setFlew('no')} color={ORANGE}
-              title="Couldn’t fly" sub="Rain / weather / other" />
+            <Seg active={dayType === 'flew'} onClick={() => setDayType('flew')} color="#0B8B43"
+              title="✈ Flew / captured" sub="Upload the day’s files" />
+            <Seg active={dayType === 'nofly'} onClick={() => setDayType('nofly')} color={ORANGE}
+              title="⛅ Couldn’t fly" sub="Weather / access / fault" />
+            <Seg active={dayType === 'off'} onClick={() => setDayType('off')} color={NAVY}
+              title="◐ Day off" sub="Leave · rest day" />
+            <Seg active={dayType === 'repl'} onClick={() => setDayType('repl')} color="#BA7517"
+              title="◆ RePL study" sub="Licence progress" />
           </div>
         </div>
 
-        {/* flew branch */}
-        {flew === 'yes' ? (
+        {/* day-type branch */}
+        {didFly ? (
           <div>
             <FieldLabel done={filesDone}>Today’s flight files</FieldLabel>
             <div onClick={() => fileRef.current && fileRef.current.click()}
@@ -615,8 +680,62 @@ function App() {
               </div>
             )}
 
+            {/* coverage screenshot — the pilot's marked/coloured picture of what they flew today */}
+            <div style={{ marginTop: 18 }}>
+              <FieldLabel done={!!coverImg}>Coverage screenshot{' '}
+                <span style={{ color: ORANGE, fontWeight: 600, textTransform: 'none' }}>· required</span>
+                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · mark &amp; colour the area you flew</span>
+              </FieldLabel>
+              {!coverImg ? (
+                <div onClick={() => coverRef.current && coverRef.current.click()}
+                  onDragOver={(e) => { e.preventDefault(); setCoverDrag(true); }}
+                  onDragLeave={() => setCoverDrag(false)}
+                  onDrop={(e) => { e.preventDefault(); setCoverDrag(false); setCover(e.dataTransfer.files); }}
+                  style={{ border: `1.5px dashed ${coverDrag ? NAVY : '#C7CCD9'}`, borderRadius: 13,
+                    background: coverDrag ? 'rgba(10,31,92,0.04)' : '#fff', padding: '18px', cursor: 'pointer',
+                    textAlign: 'center', transition: 'all .15s' }}>
+                  <input ref={coverRef} type="file" accept="image/*" hidden onChange={(e) => setCover(e.target.files)} />
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={NAVY} strokeWidth="1.7"
+                    style={{ marginBottom: 5 }}><rect x="3" y="4" width="18" height="15" rx="2"/>
+                    <circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l5-5 4 4 3-3 4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                  <div style={{ fontWeight: 700, color: INK, fontSize: 14.5 }}>Add a screenshot of today’s flown area</div>
+                  <div style={{ fontSize: 12.5, color: FAINT, marginTop: 3 }}>Outline &amp; colour where you captured — from Maps, your capture app, or a photo markup. One image.</div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff',
+                  border: `1px solid ${LINE}`, borderRadius: 11, padding: '10px 12px' }}>
+                  <img src={coverUrl} alt="coverage" style={{ width: 64, height: 48, objectFit: 'cover',
+                    borderRadius: 7, border: `1px solid ${LINE}`, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{coverImg.name}</div>
+                    <div style={{ fontSize: 12, color: FAINT, fontFamily: '"JetBrains Mono", monospace' }}>{fmtBytes(coverImg.size)} · marked coverage</div>
+                  </div>
+                  <button onClick={() => coverRef.current && coverRef.current.click()}
+                    style={{ fontSize: 12.5, fontWeight: 700, color: NAVY, padding: '6px 10px', border: `1.5px solid ${LINE}`, borderRadius: 8 }}>Replace</button>
+                  <button onClick={clearCover} title="Remove" style={{ color: FAINT, fontSize: 18, lineHeight: 1, padding: '0 2px' }}>×</button>
+                </div>
+              )}
+            </div>
+
+            {/* quick reporting fields — help reconcile against the map register */}
+            <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+              <div>
+                <label style={formStyles.label}>Properties today{' '}
+                  <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· optional</span></label>
+                <input className="ar-field" type="number" min="0" inputMode="numeric" placeholder="e.g. 42"
+                  style={formStyles.field} value={propCount}
+                  onChange={(e) => setPropCount(e.target.value.replace(/[^0-9]/g, ''))} />
+              </div>
+              <div>
+                <label style={formStyles.label}>Suburb / area{' '}
+                  <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· optional</span></label>
+                <input className="ar-field" placeholder="e.g. Truganina"
+                  style={formStyles.field} value={area} onChange={(e) => setArea(e.target.value)} />
+              </div>
+            </div>
+
           </div>
-        ) : (
+        ) : dayType === 'nofly' ? (
           <div style={{ animation: 'ar-pop .25s ease' }}>
             <FieldLabel done={reasonDone}>Why couldn’t you fly?</FieldLabel>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
@@ -632,6 +751,20 @@ function App() {
                 value={reasonOther} onChange={(e) => setReasonOther(e.target.value)} />
             )}
             <div style={formStyles.hint}>This marks {prettyDate(date)} a non‑production day — it’s removed from your target.</div>
+          </div>
+        ) : dayType === 'off' ? (
+          <div style={{ animation: 'ar-pop .25s ease' }}>
+            <div style={{ background: '#F4F6FB', border: `1px solid ${LINE}`, borderRadius: 12, padding: '14px 16px' }}>
+              <div style={{ fontWeight: 700, color: NAVY, fontSize: 14.5, marginBottom: 3 }}>◐ Day off — {prettyDate(date)}</div>
+              <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5 }}>Logged as a rest day (leave / RDO / public holiday). It won’t count against your capture target. Add the leave type in the notes below if it helps.</div>
+            </div>
+          </div>
+        ) : (
+          <div style={{ animation: 'ar-pop .25s ease' }}>
+            <div style={{ background: '#FBF3E4', border: '1px solid #E7D3AC', borderRadius: 12, padding: '14px 16px' }}>
+              <div style={{ fontWeight: 700, color: '#8A5A0E', fontSize: 14.5, marginBottom: 3 }}>◆ RePL study — {prettyDate(date)}</div>
+              <div style={{ fontSize: 13, color: '#7A5A2A', lineHeight: 1.5 }}>Counts as a work day toward your licence — it shows in the team report as RePL progress, not a lost day. Note the module or hours below.</div>
+            </div>
           </div>
         )}
 
@@ -657,9 +790,12 @@ function App() {
               ? <><span style={{ width: 16, height: 16, border: '2px solid rgba(255,255,255,0.4)',
                   borderTopColor: '#fff', borderRadius: '50%', animation: 'ar-spin .7s linear infinite' }} />
                   {progress || 'Sending…'}</>
-              : (flew === 'yes' ? 'Submit today’s capture' : 'Submit no‑fly day')}
+              : (didFly ? 'Submit today’s capture'
+                  : dayType === 'nofly' ? 'Submit no‑fly day'
+                  : dayType === 'off' ? 'Submit day off'
+                  : 'Submit study day')}
           </button>
-          {status !== 'submitting' && errors.length > 0 && (opId || files.length > 0 || flew === 'no') && (
+          {status !== 'submitting' && errors.length > 0 && (opId || files.length > 0 || dayType !== 'flew') && (
             <div style={{ ...formStyles.hint, color: ORANGE, marginTop: 9 }}>{errors[0]}</div>
           )}
         </div>
@@ -710,9 +846,9 @@ function Shell({ children, setupOpen, setSetupOpen, configured }) {
         {/* title band */}
         <div style={{ marginBottom: 20 }}>
           <h1 style={{ margin: '0 0 5px', fontSize: 26, fontWeight: 800, letterSpacing: '-0.01em', color: NAVY }}>
-            Daily capture submission</h1>
+            Daily field log</h1>
           <p style={{ margin: 0, color: MUTED, fontSize: 15, lineHeight: 1.5 }}>
-            End‑of‑day wrap‑up — your one stop to log the day. Files, what you captured, or a no‑fly day. Submit every day.</p>
+            Your one daily check-in. Log every day — flew, weather, day off, or RePL study. On flying days, drop your files and a marked screenshot of what you covered.</p>
         </div>
 
         {/* card */}
