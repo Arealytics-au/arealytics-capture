@@ -135,8 +135,7 @@ function App() {
   const [reasonOther, setReasonOther] = useState('');
   const [coverImg, setCoverImg] = useState(null); // File — screenshot of today's flown area (marked/coloured)
   const [coverUrl, setCoverUrl] = useState('');   // object URL for the preview thumbnail
-  const [propCount, setPropCount] = useState(''); // properties captured today (self-reported, aids reconciliation)
-  const [area, setArea] = useState('');           // suburb / area flown (free text)
+  const [area, setArea] = useState('');           // suburb / area / postcode(s) flown — required on a flying day
   const [files, setFiles] = useState([]);        // File[]
   const [decoded, setDecoded] = useState({});    // fkey -> { status, ...summary }
   const [dateTouched, setDateTouched] = useState(false);
@@ -327,6 +326,8 @@ function App() {
     else if (anyError) errors.push('Remove the file(s) that couldn’t be read, then add the correct ones.');
     // Coverage screenshot is REQUIRED on a flying day — it's the visual record of the area flown.
     if (!coverImg) errors.push('Add a coverage screenshot of the area you flew (marked & coloured).');
+    // Suburb / area / postcode(s) is REQUIRED — every flying day must have a location on record.
+    if (!area.trim()) errors.push('Enter the suburb / area / postcode(s) you flew.');
   }
   if (dayType === 'nofly' && !reason) errors.push('Pick why you couldn\u2019t fly.');
   if (dayType === 'nofly' && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
@@ -346,7 +347,6 @@ function App() {
       // existing dashboard ingest (which reads meta.flew) keeps working unchanged.
       day_type: dayType, flew: didFly,
       reason: dayType === 'nofly' ? reasonFinal : '',
-      prop_count: didFly && propCount !== '' ? (Number(propCount) || 0) : 0,
       area_flown: didFly ? area.trim() : '',
       coverage_image: (didFly && coverImg) ? coverName() : '',
       decoded: didFly ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
@@ -517,7 +517,7 @@ function App() {
 
   const reset = () => {
     setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setDayType('flew');
-    clearCover(); setPropCount(''); setArea('');
+    clearCover(); setArea('');
     setDateTouched(false);
     setStatus('idle'); setResult(null); setProgress(''); setDate(todayISO());
   };
@@ -617,16 +617,13 @@ function App() {
         {/* day type — the one required choice each day; maps 1:1 to the reporting categories */}
         <div>
           <label style={formStyles.label}>What kind of day was it?</label>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-            <Seg active={dayType === 'flew'} onClick={() => setDayType('flew')} color="#0B8B43"
-              title="✈ Flew / captured" sub="Upload the day’s files" />
-            <Seg active={dayType === 'nofly'} onClick={() => setDayType('nofly')} color={ORANGE}
-              title="⛅ Couldn’t fly" sub="Weather / access / fault" />
-            <Seg active={dayType === 'off'} onClick={() => setDayType('off')} color={NAVY}
-              title="◐ Day off" sub="Leave · rest day" />
-            <Seg active={dayType === 'repl'} onClick={() => setDayType('repl')} color="#BA7517"
-              title="◆ RePL study" sub="Licence progress" />
-          </div>
+          <select className="ar-field" style={formStyles.field} value={dayType}
+            onChange={(e) => setDayType(e.target.value)}>
+            <option value="flew">Flew / captured</option>
+            <option value="nofly">Couldn’t fly</option>
+            <option value="off">Day off</option>
+            <option value="repl">RePL study</option>
+          </select>
         </div>
 
         {/* day-type branch */}
@@ -731,21 +728,13 @@ function App() {
               )}
             </div>
 
-            {/* quick reporting fields — help reconcile against the map register */}
-            <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-              <div>
-                <label style={formStyles.label}>Properties today{' '}
-                  <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· optional</span></label>
-                <input className="ar-field" type="number" min="0" inputMode="numeric" placeholder="e.g. 42"
-                  style={formStyles.field} value={propCount}
-                  onChange={(e) => setPropCount(e.target.value.replace(/[^0-9]/g, ''))} />
-              </div>
-              <div>
-                <label style={formStyles.label}>Suburb / area{' '}
-                  <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· optional</span></label>
-                <input className="ar-field" placeholder="e.g. Truganina"
-                  style={formStyles.field} value={area} onChange={(e) => setArea(e.target.value)} />
-              </div>
+            {/* area flown — REQUIRED so every flying day has a location on record */}
+            <div style={{ marginTop: 16 }}>
+              <FieldLabel done={!!area.trim()}>Suburb / area / postcode(s){' '}
+                <span style={{ color: ORANGE, fontWeight: 600, textTransform: 'none' }}>· required</span>
+              </FieldLabel>
+              <input className="ar-field" placeholder="e.g. Truganina 3029, Derrimut 3026"
+                style={formStyles.field} value={area} onChange={(e) => setArea(e.target.value)} />
             </div>
 
           </div>
