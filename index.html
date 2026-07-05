@@ -21,15 +21,15 @@
   @keyframes ar-spin { to { transform: rotate(360deg); } }
   @keyframes ar-pop { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
 </style>
-<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 <!-- Hosted submission backend (file uploads). Loaded for the Supabase path. -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <!-- Zero-setup fallback: bundle the day's files into one downloadable package. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <!-- In-browser DJI decoder: validates & summarises .SRT / .TXT on upload. -->
-<script src="flight-decoder.js?v=2"></script>
+<script src="flight-decoder.js?v=3"></script>
 </head>
 <body>
 <img src="assets/arealytics-logo-full.png" style="display:none" alt="" id="__logo" />
@@ -130,7 +130,7 @@ function App() {
   const [date, setDate] = useState(todayISO());
   // The day-type is the ONE required choice each day — it maps 1:1 to the reporting categories
   // (flew / weather-or-blocked / day off / RePL study). Replaces the old flew yes/no.
-  const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'off' | 'repl'
+  const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'off' | 'repl' | 'extract'
   const [reason, setReason] = useState('');       // weather / blocker reason (when nofly)
   const [reasonOther, setReasonOther] = useState('');
   const [coverImg, setCoverImg] = useState(null); // File — screenshot of today's flown area (marked/coloured)
@@ -138,7 +138,9 @@ function App() {
   const [area, setArea] = useState('');           // suburb / area / postcode(s) flown — required on a flying day
   const [files, setFiles] = useState([]);        // File[]
   const [decoded, setDecoded] = useState({});    // fkey -> { status, ...summary }
-  const [dateTouched, setDateTouched] = useState(false);
+  // Ref, NOT state: it's read inside async decode callbacks (M4E extraction can run for minutes),
+  // and a state value there is a stale closure — the pilot's manually-set date got clobbered.
+  const dateTouchedRef = useRef(false);
   const [notes, setNotes] = useState('');
   const [drag, setDrag] = useState(false);
   const [coverDrag, setCoverDrag] = useState(false);   // drag state for the coverage-image dropzone
@@ -153,6 +155,7 @@ function App() {
   // Damien only: a writable handle to the folder his M4E videos were dragged from (his SD card),
   // so the in-browser-extracted SRTs can be written straight back next to the source videos.
   const srtDirRef = useRef(null);
+  const submittingRef = useRef(false);   // imperative double-submit lock (state alone races on slow phones)
   const [srtSaved, setSrtSaved] = useState('');   // status line for the write-back
 
   const driveOn = !!CONFIG.DRIVE_ENDPOINT;
@@ -169,7 +172,7 @@ function App() {
   const decErr = decList.filter(d => d.status === 'error').length;
   const decSec = decList.reduce((a, d) => a + (d.durationSec || 0), 0);
   const decodedNote = decList.length
-    ? `  ·  ${decOk + decEnc} flight ${(decOk + decEnc) === 1 ? 'log' : 'logs'} ready${decErr ? ` · ${decErr} empty skipped` : ''}${decSec ? ` · ${Math.round(decSec / 60)} min flown` : ''}`
+    ? `  ·  ${decOk + decEnc} flight ${(decOk + decEnc) === 1 ? 'log' : 'logs'} ready${decErr ? ` · ${decErr} unreadable — remove to submit` : ''}${decSec ? ` · ${Math.round(decSec / 60)} min flown` : ''}`
     : '';
 
   // ---- per-field completion (drives the ticks + the submit gate) ----
@@ -184,6 +187,9 @@ function App() {
   const reasonDone = dayType === 'nofly' && !!reason && (reason !== 'Other' || !!reasonOther.trim());
 
   const addFiles = (list) => {
+    // submitDrive iterates a SNAPSHOT of `files` — anything added mid-upload would show in the list
+    // but silently never send. Freeze the list while submitting.
+    if (status === 'submitting') return;
     const incoming = Array.from(list || []).filter(f => okFile(f.name));
     const seen = new Set(files.map(f => fkey(f)));
     const fresh = incoming.filter(f => !seen.has(fkey(f)));
@@ -191,19 +197,30 @@ function App() {
     setFiles(prev => [...prev, ...fresh]);
     setDecoded(d => { const n = { ...d }; fresh.forEach(f => { n[fkey(f)] = { status: 'decoding' }; }); return n; });
     // Decode each new file in the browser — validate + summarise (SRT and TXT).
-    fresh.forEach(f => {
+    const decodeOne = (f) => {
       const k = fkey(f);
-      if (!window.FlightDecoder) { setDecoded(d => ({ ...d, [k]: { status: 'ok', model: null } })); return; }
-      window.FlightDecoder.decode(f, (pct) => {
+      // Decoder missing (script failed to load) = FAIL LOUD. Never mark the file "ok": an undecoded
+      // .MP4 would fall through to the raw-upload path and try to POST the multi-GB video itself.
+      if (!window.FlightDecoder) { setDecoded(d => ({ ...d, [k]: { status: 'error', error: 'decoder failed to load — reload the page and re-add this file' } })); return Promise.resolve(); }
+      return window.FlightDecoder.decode(f, (pct) => {
         setDecoded(d => ({ ...d, [k]: { ...(d[k] || {}), status: 'decoding', progress: pct } }));
       }).then(res => {
         setDecoded(d => ({ ...d, [k]: { status: res.ok ? ((res.encrypted && !res.decrypted) ? 'encrypted' : 'ok') : 'error', ...res } }));
         // First valid SRT date auto-fills the capture date (until the operator edits it).
-        if (res.ok && res.dateISO && !dateTouched) setDate(res.dateISO);
+        if (res.ok && res.dateISO && !dateTouchedRef.current) setDate(res.dateISO);
+      }).catch(() => {
+        setDecoded(d => ({ ...d, [k]: { status: 'error', error: 'could not be read' } }));
       });
-    });
+    };
+    // Text files decode in parallel (cheap), but VIDEOS go one at a time: each M4E extraction holds
+    // tens of MB of chunk buffers + regex state — a 10-video drop decoded concurrently is ~500MB of
+    // churn and kills the tab on a field phone.
+    const isVid = (f) => /\.(mp4|mov)$/i.test(f.name);
+    fresh.filter(f => !isVid(f)).forEach(decodeOne);
+    (async () => { for (const f of fresh.filter(isVid)) await decodeOne(f); })();
   };
   const removeFile = (i) => {
+    if (status === 'submitting') return;   // list is frozen while uploading (see addFiles)
     const f = files[i];
     setFiles(prev => prev.filter((_, j) => j !== i));
     if (f) setDecoded(d => { const n = { ...d }; delete n[fkey(f)]; return n; });
@@ -212,6 +229,7 @@ function App() {
   // Coverage screenshot — the pilot's marked/coloured picture of the area they flew today.
   // Just an image; stored alongside the flight files so management can see WHAT was covered.
   const setCover = (list) => {
+    if (status === 'submitting') return;   // frozen while uploading (see addFiles)
     const img = Array.from(list || []).find(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|heic|gif)$/i.test(f.name));
     if (!img) return;
     if (coverUrl) { try { URL.revokeObjectURL(coverUrl); } catch (e) {} }
@@ -233,11 +251,20 @@ function App() {
 
   // The decoded CSV for a file (SRT / legacy TXT built in-browser; encrypted TXT already CSV
   // from the decrypt service). Returns null when there's no telemetry to write.
+  // Memoised: toCSV walks every telemetry frame (a 45-min TXT ≈ 27k rows) and submit needs the CSV
+  // 2-3× per file — build it once per fkey. Only truthy results cache (a file mid-decode returns null
+  // and must be recomputed later); cleared in reset().
+  const csvCacheRef = useRef({});
   const csvFor = (f) => {
-    const d = decoded[fkey(f)];
+    const k = fkey(f);
+    if (csvCacheRef.current[k] !== undefined) return csvCacheRef.current[k];
+    const d = decoded[k];
     if (!d || !d.ok || (d.encrypted && !d.decrypted)) return null;
-    try { return window.FlightDecoder && window.FlightDecoder.toCSV(d, { operator: opName }); }
-    catch (e) { return null; }
+    let v = null;
+    try { v = window.FlightDecoder && window.FlightDecoder.toCSV(d, { operator: opName }); }
+    catch (e) { v = null; }
+    if (v) csvCacheRef.current[k] = v;
+    return v;
   };
   const csvName = (name) => name.replace(/\.(srt|txt|mp4|mov)$/i, '') + '.csv';
 
@@ -337,11 +364,14 @@ function App() {
   const makeRef = () => `AR-${date.replace(/-/g, '')}-${(opId === 'other' ? 'EXT' : (op ? op.id.replace('op-', '').toUpperCase() : 'OP'))}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
   const submit = async () => {
-    if (!canSubmit) return;
+    // Imperative double-tap guard: two taps landing before a React commit both see canSubmit=true
+    // (closure), which would mint two refs + two manifests for the same day.
+    if (!canSubmit || submittingRef.current) return;
+    submittingRef.current = true;
     setStatus('submitting'); setErrorMsg(''); setProgress('');
     const ref = makeRef();
     const meta = {
-      ref, operator: opName, op_id: opId, state: '', city: '',
+      ref, operator: opName, op_id: opId,
       capture_date: date,
       // day_type is the reporting-friendly category; `flew` is kept as a derived boolean so the
       // existing dashboard ingest (which reads meta.flew) keeps working unchanged.
@@ -368,6 +398,8 @@ function App() {
     } catch (e) {
       setErrorMsg(String(e && e.message ? e.message : e));
       setStatus('error');
+    } finally {
+      submittingRef.current = false;
     }
   };
 
@@ -383,7 +415,13 @@ function App() {
   async function postDrive(payload) {
     // text/plain body => a "simple" request => no CORS preflight (Apps Script can't answer one).
     const res = await fetch(CONFIG.DRIVE_ENDPOINT, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
-    let j = null; try { j = await res.json(); } catch (e) {}
+    // FAIL LOUD: an HTTP error, or a non-JSON body (Apps Script auth/quota pages and captive portals
+    // return HTML, often with status 200) must NEVER count as an upload. Only real JSON that doesn't
+    // say ok:false is a success.
+    if (!res.ok) throw new Error('Upload endpoint error (HTTP ' + res.status + ')');
+    let j;
+    try { j = await res.json(); }
+    catch (e) { throw new Error('Upload endpoint returned an unexpected (non-JSON) response — file NOT confirmed'); }
     if (j && j.ok === false) throw new Error(j.error || 'Drive upload failed');
     return j || { ok: true };
   }
@@ -408,9 +446,18 @@ function App() {
     if (meta.flew) {
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
+        const dec = decoded[fkey(f)] || {};
+        // Apps Script POSTs cap out around 50MB and base64 inflates ×1.37 — a raw file >35MB can
+        // never succeed, so fail it fast WITH the reason instead of burning 3 blind retries.
+        if (!dec.extractedSrt && f.size > 35 * 1024 * 1024) {
+          failed.push(f.name + ' (over the ~35MB upload limit)');
+          continue;
+        }
         setProgress(`Uploading ${i + 1} / ${files.length} · ${f.name}`);
         try {
-          const dec = decoded[fkey(f)] || {};
+          // HARD GUARD: a video without extracted telemetry must NEVER reach the raw-upload path —
+          // base64-ing a multi-GB .MP4 kills the tab, and the video must never leave the machine.
+          if (/\.(mp4|mov)$/i.test(f.name) && !dec.extractedSrt) throw new Error('video has no extracted telemetry');
           if (dec.extractedSrt) {
             // M4E video: telemetry was extracted in-browser — upload ONLY that (a few MB).
             // The multi-GB video never leaves this machine.
@@ -422,38 +469,53 @@ function App() {
             await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
               name: f.name, mimeType: f.type || 'application/octet-stream', dataB64 });
           }
-          // save the decoded CSV alongside the raw file when we have telemetry
+          // Decoded CSV sidecar — its OWN try/catch: the raw flight file above already landed, and
+          // the CSV is re-derivable from it at bake time, so a CSV hiccup must not mark the FLIGHT failed.
           const csv = csvFor(f);
           if (csv) {
-            await postDriveRetry({ operator: meta.operator, date: meta.capture_date, name: csvName(f.name),
-              mimeType: 'text/csv', dataB64: btoa(unescape(encodeURIComponent(csv))) });
+            try {
+              await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+                name: csvName(f.name), mimeType: 'text/csv', dataB64: btoa(unescape(encodeURIComponent(csv))) });
+            } catch (e) { /* deliberate: sidecar only — the bake decodes the raw file itself */ }
           }
         } catch (e) {
           failed.push(f.name);                 // record + keep going — do NOT abort the batch
         }
-        await sleep(250);                        // gentle pacing so a burst of POSTs doesn't get throttled
+        if (i < files.length - 1) await sleep(250);   // gentle pacing between POSTs (none after the last)
       }
     }
-    // Coverage screenshot (the pilot's marked/coloured picture of what they flew). Supplementary —
-    // a failure here must NOT fail the day's submission, so it's caught and recorded in `failed`.
+    // Coverage screenshot (the pilot's marked/coloured picture of what they flew). Tracked SEPARATELY
+    // from the flight files: pushing its name into `failed` corrupted the N/M arithmetic + manifest semantics.
+    let coverageFailed = false;
     if (meta.flew && coverImg && meta.coverage_image) {
       setProgress('Uploading coverage screenshot…');
       try {
         const dataB64 = await fileToB64(coverImg);
+        // iPhone camera-roll images arrive as HEIC often with an empty File.type — derive the mime
+        // from the stored filename's extension rather than mislabelling a .heic as PNG in Drive.
+        const coverExt = (meta.coverage_image.split('.').pop() || '').toLowerCase();
+        const coverMime = coverImg.type ||
+          ({ png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', heic: 'image/heic', gif: 'image/gif' }[coverExt] || 'application/octet-stream');
         await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
-          name: meta.coverage_image, mimeType: coverImg.type || 'image/png', dataB64 });
-      } catch (e) { failed.push(meta.coverage_image); }
+          name: meta.coverage_image, mimeType: coverMime, dataB64 });
+      } catch (e) { coverageFailed = true; }
     }
     setProgress('Recording submission…');
+    // The manifest is NOT "just a summary": on non-flying days it is the ENTIRE submission (no files
+    // upload), and on flying days it carries day_type/area/coverage/decoded. Its failure must surface.
+    let manifestErr = null;
     try {
       await postDriveRetry({ action: 'manifest', operator: meta.operator, op_id: meta.op_id,
-        date: meta.capture_date, ref: meta.ref, meta: { ...meta, failed } });
-    } catch (e) { /* manifest is just the day summary — never let it mask the file results */ }
-    if (failed.length) {
-      const ok = files.length - failed.length;
-      const err = new Error(`${ok}/${files.length} files uploaded. ${failed.length} could not be sent: ${failed.join(', ')}. Tap Submit again to re-send the missing ones (already-uploaded files are skipped).`);
+        date: meta.capture_date, ref: meta.ref, meta: { ...meta, failed, coverage_failed: coverageFailed } });
+    } catch (e) { manifestErr = e; }
+    const problems = [];
+    if (failed.length) problems.push(`${files.length - failed.length}/${files.length} flight files uploaded — ${failed.length} could not be sent: ${failed.join(', ')}.`);
+    if (coverageFailed) problems.push('The coverage screenshot could not be sent.');
+    if (manifestErr) problems.push('The day could not be recorded (the submission summary failed to send).');
+    if (problems.length) {
+      const err = new Error(problems.join(' ') + ' Tap Submit again to re-send — files already uploaded are replaced server-side, not duplicated.');
       err.failed = failed;
-      throw err;                                 // surfaced on the error screen with the exact missing files
+      throw err;                                 // surfaced on the error screen with the exact missing pieces
     }
   }
 
@@ -465,7 +527,8 @@ function App() {
     // Storage rejects as an "Invalid key". Sanitise the key for upload, but keep the
     // ORIGINAL filename in the row's `files` metadata so the owner sees the real name.
     const keySafe = (s) => String(s).replace(/[^A-Za-z0-9._-]/g, '_');
-    for (let i = 0; i < files.length; i++) {
+    // Files only on FLYING days — mirrors the Drive path (a flew→off switch leaves stale files in state).
+    for (let i = 0; meta.flew && i < files.length; i++) {
       const f = files[i];
       setProgress(`Uploading ${i + 1} / ${files.length} \u00b7 ${f.name}`);
       // M4E video: upload only the in-browser-extracted telemetry, never the video bytes.
@@ -500,11 +563,18 @@ function App() {
     setProgress('Packaging your files\u2026');
     const zip = new window.JSZip();
     zip.file('submission.json', JSON.stringify({ ...meta, files: files.map(f => ({ name: f.name, size: f.size })) }, null, 2));
+    // Mirror the Drive path: files only on FLYING days (a flew\u2192off switch can leave stale files in
+    // state), and for M4E videos bundle the EXTRACTED SRT \u2014 never the multi-GB video (zip generation
+    // holds the archive in memory, and the video must never leave the machine).
     const folder = zip.folder('flight-files');
-    for (const f of files) folder.file(f.name, f);
+    if (meta.flew) for (const f of files) {
+      const dec = decoded[fkey(f)] || {};
+      if (dec.extractedSrt) folder.file(f.name.replace(/\.(mp4|mov)$/i, '.srt'), dec.extractedSrt);
+      else if (!/\.(mp4|mov)$/i.test(f.name)) folder.file(f.name, f);
+    }
     // decoded CSVs alongside the raw files
     const csvFolder = zip.folder('decoded-csv');
-    for (const f of files) { const csv = csvFor(f); if (csv) csvFolder.file(csvName(f.name), csv); }
+    if (meta.flew) for (const f of files) { const csv = csvFor(f); if (csv) csvFolder.file(csvName(f.name), csv); }
     // coverage screenshot
     if (meta.flew && coverImg && meta.coverage_image) zip.file(meta.coverage_image, coverImg);
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
@@ -517,8 +587,10 @@ function App() {
 
   const reset = () => {
     setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setDayType('flew');
+    csvCacheRef.current = {};   // free the memoised multi-MB CSV strings
     clearCover(); setArea('');
-    setDateTouched(false);
+    dateTouchedRef.current = false;
+    setSrtSaved('');   // stale "✓ saved" text would hide the save-to-card button on the next day's submission
     setStatus('idle'); setResult(null); setProgress(''); setDate(todayISO());
   };
 
@@ -610,7 +682,7 @@ function App() {
         <div>
           <FieldLabel done={dateDone}>Capture date</FieldLabel>
           <input className="ar-field" style={formStyles.field} type="date" value={date} max={todayISO()}
-            onChange={(e) => { setDate(e.target.value); setDateTouched(true); }} />
+            onChange={(e) => { setDate(e.target.value); dateTouchedRef.current = true; }} />
           <div style={formStyles.hint}>{prettyDate(date)}</div>
         </div>
 
@@ -623,6 +695,7 @@ function App() {
             <option value="nofly">Couldn’t fly</option>
             <option value="off">Day off</option>
             <option value="repl">RePL study</option>
+            <option value="extract">Image Extraction</option>
           </select>
         </div>
 
@@ -762,11 +835,18 @@ function App() {
               <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5 }}>Logged as a rest day (leave / RDO / public holiday). It won’t count against your capture target. Add the leave type in the notes below if it helps.</div>
             </div>
           </div>
-        ) : (
+        ) : dayType === 'repl' ? (
           <div style={{ animation: 'ar-pop .25s ease' }}>
             <div style={{ background: '#FBF3E4', border: '1px solid #E7D3AC', borderRadius: 12, padding: '14px 16px' }}>
               <div style={{ fontWeight: 700, color: '#8A5A0E', fontSize: 14.5, marginBottom: 3 }}>◆ RePL study — {prettyDate(date)}</div>
               <div style={{ fontSize: 13, color: '#7A5A2A', lineHeight: 1.5 }}>Counts as a work day toward your licence — it shows in the team report as RePL progress, not a lost day. Note the module or hours below.</div>
+            </div>
+          </div>
+        ) : (
+          <div style={{ animation: 'ar-pop .25s ease' }}>
+            <div style={{ background: '#E8F1FA', border: '1px solid #B9D6EE', borderRadius: 12, padding: '14px 16px' }}>
+              <div style={{ fontWeight: 700, color: '#0A4C82', fontSize: 14.5, marginBottom: 3 }}>▤ Image Extraction — {prettyDate(date)}</div>
+              <div style={{ fontSize: 13, color: '#0A4C82', lineHeight: 1.5 }}>A working day — processing imagery from routes already flown (no new flight). Counts as a full work day in the team report, not a lost/no‑fly day. Note what you worked on below (routes / areas processed).</div>
             </div>
           </div>
         )}
@@ -796,7 +876,8 @@ function App() {
               : (didFly ? 'Submit today’s capture'
                   : dayType === 'nofly' ? 'Submit no‑fly day'
                   : dayType === 'off' ? 'Submit day off'
-                  : 'Submit study day')}
+                  : dayType === 'repl' ? 'Submit study day'
+                  : 'Submit extraction day')}
           </button>
           {status !== 'submitting' && errors.length > 0 && (opId || files.length > 0 || dayType !== 'flew') && (
             <div style={{ ...formStyles.hint, color: ORANGE, marginTop: 9 }}>{errors[0]}</div>
@@ -873,16 +954,6 @@ function FormsPanel({ opId, opName }) {
       </div>
       <div style={{ ...formStyles.hint, marginTop: 12 }}>Opens in Google Drive — sign in with your <b>@arealytics.com.au</b> account.</div>
     </div>
-  );
-}
-
-function Seg({ active, onClick, color, title, sub }) {  return (
-    <button onClick={onClick} style={{ textAlign: 'left', padding: '13px 14px', borderRadius: 12,
-      border: `1.5px solid ${active ? color : LINE}`, background: active ? color : '#fff',
-      transition: 'all .15s' }}>
-      <div style={{ fontWeight: 700, fontSize: 14.5, color: active ? '#fff' : INK }}>{title}</div>
-      <div style={{ fontSize: 12, marginTop: 2, color: active ? 'rgba(255,255,255,0.85)' : FAINT }}>{sub}</div>
-    </button>
   );
 }
 

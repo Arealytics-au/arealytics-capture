@@ -129,9 +129,15 @@
     const serial = serialM ? serialM[1] : null;
 
     if (osd.length < 10) {
-      // Encrypted modern DJI Fly / Pilot 2 log \u2014 keys are server-side.
-      return { ok: true, kind: 'TXT', name, encrypted: true, model, serial,
-        note: 'Encrypted DJI log \u2014 telemetry is processed after upload.' };
+      // Encrypted modern DJI Fly / Pilot 2 log \u2014 keys are server-side. But ONLY claim that with
+      // positive DJI evidence: the details block is PLAINTEXT even in encrypted logs, so a real one
+      // carries a model/serial (and DJI names them ...FlightRecord...). Without any of that, this is
+      // a notes file / renamed doc / corrupted log \u2014 a green "ready" tick on garbage fakes validation.
+      if (model || serial || /flightrecord/i.test(name)) {
+        return { ok: true, kind: 'TXT', name, encrypted: true, model, serial,
+          note: 'Encrypted DJI log \u2014 telemetry is processed after upload.' };
+      }
+      return { ok: false, kind: 'TXT', name, error: 'not a readable DJI flight log' };
     }
     const HZ = 10;
     return summarise(osd, {
