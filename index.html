@@ -102,7 +102,7 @@ const fmtBytes = (n) => n < 1024 ? n + ' B'
   : n < 1048576 ? (n / 1024).toFixed(0) + ' KB'
   : (n / 1048576).toFixed(1) + ' MB';
 
-const okFile = (name) => /\.(srt|txt|mp4|mov)$/i.test(name);
+const okFile = (name) => /\.(srt|txt)$/i.test(name);   // SRT & TXT logs only — MP4/video goes through the VST tool
 const fkey = (f) => f.name + '|' + f.size;
 const todayISO = () => { const d = new Date(); const z = (x) => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`; };
@@ -125,7 +125,12 @@ function Logo() {
 }
 
 function App() {
-  const [opId, setOpId] = useState('');
+  const [opId, setOpId] = useState(() => {
+    // When embedded in the field app the operator is already signed in, so it passes ?op=op-<id>.
+    // Preselect their name instead of making them pick it again — one less daily step.
+    try { const p = new URLSearchParams(location.search).get('op');
+      return (p && ROSTER.some(o => o.id === p)) ? p : ''; } catch (e) { return ''; }
+  });
   const [otherName, setOtherName] = useState('');
   const [date, setDate] = useState(todayISO());
   // The day-type is the ONE required choice each day — it maps 1:1 to the reporting categories
@@ -348,7 +353,7 @@ function App() {
   if (!nameDone) errors.push('Select your name.');
   if (!dateDone) errors.push('Choose the capture date.');
   if (didFly) {
-    if (files.length === 0) errors.push('Upload the day’s .SRT / .TXT files (M4E: drop the .MP4 videos) — or pick a non-flying day above.');
+    if (files.length === 0) errors.push('Upload the day’s .SRT / .TXT flight logs — or pick a non-flying day above.');
     else if (anyDecoding) errors.push('Checking your files… one moment.');
     else if (anyError) errors.push('Remove the file(s) that couldn’t be read, then add the correct ones.');
     // Coverage screenshot is REQUIRED on a flying day — it's the visual record of the area flown.
@@ -649,7 +654,7 @@ function App() {
   }
 
   return (
-    <Shell setupOpen={setupOpen} setSetupOpen={setSetupOpen} configured={configured}>
+    <Shell setupOpen={setupOpen} setSetupOpen={setSetupOpen} configured={configured} opFirst={opName ? opName.split(' ')[0] : ''}>
       {/* tab bar — Daily log · Forms & logs (one page, everything the operator needs) */}
       <div style={{ display: 'flex', gap: 6, marginBottom: 18, background: '#EEF1F8', borderRadius: 12, padding: 4 }}>
         {[['log', 'Daily log'], ['forms', 'Forms & logs']].map(([k, label]) => (
@@ -720,18 +725,13 @@ function App() {
               style={{ border: `1.5px dashed ${drag ? NAVY : '#C7CCD9'}`, borderRadius: 13,
                 background: drag ? 'rgba(10,31,92,0.04)' : '#fff', padding: '22px 18px', cursor: 'pointer',
                 textAlign: 'center', transition: 'all .15s' }}>
-              <input ref={fileRef} type="file" multiple accept=".srt,.txt,.mp4,.mov" hidden
+              <input ref={fileRef} type="file" multiple accept=".srt,.txt" hidden
                 onChange={(e) => addFiles(e.target.files)} />
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={NAVY} strokeWidth="1.7"
                 style={{ marginBottom: 6 }}><path d="M12 16V4M12 4 L7 9M12 4 L17 9" strokeLinecap="round" strokeLinejoin="round"/>
                 <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" strokeLinecap="round"/></svg>
-              <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>Drop your <b>.SRT</b> & <b>.TXT</b> files — Matrice 4E pilots drop the <b>.MP4</b> too</div>
-              <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>or tap to browse — one set per flight. Videos are read in place: only the flight telemetry uploads, never the video.</div>
-              {isDamien && (
-                <div style={{ fontSize: 12.5, color: NAVY, marginTop: 6, fontWeight: 600 }}>
-                  Tip: drag the whole <b>card video folder</b> in and your SRTs are written straight back into it. Dropping files instead? Use the “save to SD card” button after you submit.
-                </div>
-              )}
+              <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>Drop your <b>.SRT</b> & <b>.TXT</b> flight logs</div>
+              <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>or tap to browse — one set per flight. SRT and TXT only; MP4 videos go through the VST tool.</div>
             </div>
             {files.length > 0 && (
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 7 }}>
@@ -880,7 +880,21 @@ function App() {
                   : 'Submit extraction day')}
           </button>
           {status !== 'submitting' && errors.length > 0 && (opId || files.length > 0 || dayType !== 'flew') && (
-            <div style={{ ...formStyles.hint, color: ORANGE, marginTop: 9 }}>{errors[0]}</div>
+            <div style={{ marginTop: 10, background: '#FFF6EE', border: '1px solid #FBD8B8', borderRadius: 10, padding: '11px 13px' }}>
+              <div style={{ fontSize: 11.5, fontWeight: 800, color: '#B3540A', letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 7 }}>
+                {errors.length === 1 ? '1 thing left' : errors.length + ' things left'} before you can submit
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {errors.map((e, i) => (
+                  <div key={i} style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, color: MUTED, lineHeight: 1.4 }}>
+                    <span style={{ flex: 'none', width: 16, height: 16, marginTop: 1, borderRadius: '50%',
+                      border: `1.5px solid ${ORANGE}`, color: ORANGE, fontSize: 11, fontWeight: 800,
+                      display: 'grid', placeItems: 'center' }} aria-hidden="true">!</span>
+                    <span>{e}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
       </div>
@@ -961,7 +975,11 @@ const btn = (bg) => ({ background: bg, color: '#fff', fontWeight: 700, fontSize:
   padding: '15px 22px', borderRadius: 12, letterSpacing: '0.01em' });
 
 
-function Shell({ children, setupOpen, setSetupOpen, configured }) {
+function Shell({ children, setupOpen, setSetupOpen, configured, opFirst }) {
+  // Time-of-day greeting — operators mostly log in the afternoon/evening, so greet them for when they
+  // actually open it. Falls back to the plain title until we know who they are.
+  const hr = new Date().getHours();
+  const greetWord = hr < 12 ? 'Morning' : hr < 17 ? 'Afternoon' : 'Evening';
   return (
     <div style={{ minHeight: '100vh', padding: '28px 18px 60px' }}>
       <div style={{ maxWidth: 560, margin: '0 auto' }}>
@@ -975,9 +993,9 @@ function Shell({ children, setupOpen, setSetupOpen, configured }) {
         {/* title band */}
         <div style={{ marginBottom: 20 }}>
           <h1 style={{ margin: '0 0 5px', fontSize: 26, fontWeight: 800, letterSpacing: '-0.01em', color: NAVY }}>
-            Daily field log</h1>
+            {opFirst ? `${greetWord}, ${opFirst}` : 'Daily field log'}</h1>
           <p style={{ margin: 0, color: MUTED, fontSize: 15, lineHeight: 1.5 }}>
-            Your one daily check-in. Log every day — flew, weather, day off, or RePL study. On flying days, drop your files and a marked screenshot of what you covered.</p>
+            Log this <b style={{ color: NAVY }}>every day — whether you flew or not.</b> On flying days, add your .SRT / .TXT files and a marked screenshot of what you covered.</p>
         </div>
 
         {/* card */}
