@@ -655,17 +655,10 @@ function App() {
 
   return (
     <Shell setupOpen={setupOpen} setSetupOpen={setSetupOpen} configured={configured} opFirst={opName ? opName.split(' ')[0] : ''}>
-      {/* tab bar — Daily log · Forms & logs (one page, everything the operator needs) */}
-      <div style={{ display: 'flex', gap: 6, marginBottom: 18, background: '#EEF1F8', borderRadius: 12, padding: 4 }}>
-        {[['log', 'Daily log'], ['forms', 'Forms & logs']].map(([k, label]) => (
-          <button key={k} onClick={() => setTab(k)}
-            style={{ flex: 1, padding: '10px 12px', borderRadius: 9, fontSize: 14, fontWeight: 700,
-              background: tab === k ? '#fff' : 'transparent', color: tab === k ? NAVY : MUTED,
-              boxShadow: tab === k ? '0 1px 3px rgba(10,31,92,0.14)' : 'none', transition: 'all .15s' }}>{label}</button>
-        ))}
-      </div>
+      {/* Forms & logs tab removed 6 Jul 2026 — the field app's DOCUMENTS tab now covers forms/logs, so this
+          was a double-up. `tab` stays 'log', so the daily log always renders (FormsPanel left unused). */}
 
-      {/* your name — shared across both tabs */}
+      {/* your name */}
       <div style={{ marginBottom: 18 }}>
         <FieldLabel done={nameDone}>Your name</FieldLabel>
         <select className="ar-field" style={formStyles.field} value={opId}
