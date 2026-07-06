@@ -164,6 +164,12 @@ function App() {
 
   const driveOn = !!CONFIG.DRIVE_ENDPOINT;
   const configured = driveOn || !!(CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY);
+  // The field app appends &lock=1 for a VERIFIED operator (from the Cloudflare sign-in) — lock the name to
+  // them so nobody can submit as another operator. Only applies with a valid ?op; standalone use stays editable.
+  const nameLocked = (() => {
+    try { return new URLSearchParams(location.search).get('lock') === '1' && !!opId && ROSTER.some(o => o.id === opId); }
+    catch (e) { return false; }
+  })();
   const op = ROSTER.find(o => o.id === opId);
   const opName = opId === 'other' ? otherName.trim() : (op ? op.name : '');
 
@@ -659,15 +665,29 @@ function App() {
       {/* your name */}
       <div style={{ marginBottom: 18 }}>
         <FieldLabel done={nameDone}>Your name</FieldLabel>
-        <select className="ar-field" style={formStyles.field} value={opId}
-          onChange={(e) => setOpId(e.target.value)}>
-          <option value="">Select your name…</option>
-          {ROSTER.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
-          <option value="other">Other / not listed…</option>
-        </select>
-        {opId === 'other' && (
-          <input className="ar-field" style={{ ...formStyles.field, marginTop: 10 }} placeholder="Type your full name"
-            value={otherName} onChange={(e) => setOtherName(e.target.value)} />
+        {nameLocked ? (
+          // Verified sign-in: name is fixed to the signed-in operator — no dropdown, so no submitting as someone else.
+          <div style={{ ...formStyles.field, display: 'flex', alignItems: 'center', gap: 10, background: '#F4F6FB', cursor: 'default' }}>
+            <span style={{ display: 'inline-flex', width: 22, height: 22, borderRadius: '50%', background: NAVY,
+              color: '#fff', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>
+              <svg width="13" height="13" viewBox="0 0 16 16"><path d="M4.5 8.3 L7 10.8 L11.6 5.5" stroke="#fff" strokeWidth="1.9" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            </span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: INK }}>{op ? op.name : ''}</span>
+            <span style={{ marginLeft: 'auto', fontSize: 11.5, color: FAINT }}>signed in</span>
+          </div>
+        ) : (
+          <>
+            <select className="ar-field" style={formStyles.field} value={opId}
+              onChange={(e) => setOpId(e.target.value)}>
+              <option value="">Select your name…</option>
+              {ROSTER.map(o => <option key={o.id} value={o.id}>{o.name}</option>)}
+              <option value="other">Other / not listed…</option>
+            </select>
+            {opId === 'other' && (
+              <input className="ar-field" style={{ ...formStyles.field, marginTop: 10 }} placeholder="Type your full name"
+                value={otherName} onChange={(e) => setOtherName(e.target.value)} />
+            )}
+          </>
         )}
       </div>
 
