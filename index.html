@@ -154,7 +154,6 @@ function App() {
   const [errorMsg, setErrorMsg] = useState('');
   const [result, setResult] = useState(null);    // { ref, mode }
   const [setupOpen, setSetupOpen] = useState(false);
-  const [tab, setTab] = useState('log');   // 'log' (daily submission) | 'forms' (their Drive logs)
   const fileRef = useRef(null);
   const coverRef = useRef(null);   // hidden <input type=file> for the coverage screenshot
   // Damien only: a writable handle to the folder his M4E videos were dragged from (his SD card),
@@ -655,8 +654,7 @@ function App() {
 
   return (
     <Shell setupOpen={setupOpen} setSetupOpen={setSetupOpen} configured={configured} opFirst={opName ? opName.split(' ')[0] : ''}>
-      {/* Forms & logs tab removed 6 Jul 2026 — the field app's DOCUMENTS tab now covers forms/logs, so this
-          was a double-up. `tab` stays 'log', so the daily log always renders (FormsPanel left unused). */}
+      {/* Single screen — the daily log. (Forms & logs moved to the field app's DOCUMENTS tab, 6 Jul 2026.) */}
 
       {/* your name */}
       <div style={{ marginBottom: 18 }}>
@@ -673,9 +671,6 @@ function App() {
         )}
       </div>
 
-      {tab === 'forms' ? (
-        <FormsPanel opId={opId} opName={opName} />
-      ) : (
       <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: 18 }}>
         <div>
           <FieldLabel done={dateDone}>Capture date</FieldLabel>
@@ -891,7 +886,6 @@ function App() {
           )}
         </div>
       </div>
-      )}
     </Shell>
   );
 }
@@ -910,59 +904,6 @@ function FieldLabel({ done, children }) {
   );
 }
 
-// Each field operator's own Operator-Access folder in Drive (already shared to their
-// @arealytics.com.au account). Picking a name opens THAT operator's folder — the six logs
-// they keep (Vehicle, Conversation, Incident, Equipment Fault, On-Site, Condition) live inside.
-const OPERATOR_FORMS = {
-  'op-marc':  'https://drive.google.com/drive/folders/12zS4MwU_bj5L3Ej4gIbJ8rR120Yfxt2s',
-  'op-paul':  'https://drive.google.com/drive/folders/11UOlgp40LMojqwUlCNbZlh0w9A30RYrs',
-  'op-lucas': 'https://drive.google.com/drive/folders/1yLRolXERnsb0ZH5Cq6jwP7FJVMDNiyUW',
-  'op-jakob': 'https://drive.google.com/drive/folders/1jC6lvQgPasu02vXj6PI3-eD53tqHIKFm',
-  'op-joe':   'https://drive.google.com/drive/folders/19nToDVcYtBPwQf7F2KYR3bqua7Cwz_0e',
-};
-const OPERATOR_LOG_LIST = [
-  'Vehicle Log', 'Conversation Log', 'Incident & Near-Miss Log',
-  'Equipment Fault & Damage Log', 'On-Site Interaction & Reporting', 'Condition Record',
-];
-
-function FormsPanel({ opId, opName }) {
-  const url = OPERATOR_FORMS[opId];
-  const box = { background: '#F4F6FB', border: `1px solid ${LINE}`, borderRadius: 12, padding: '16px 18px' };
-  if (!opId || opId === 'other') {
-    return <div style={{ ...box, color: MUTED, fontSize: 14, lineHeight: 1.5 }}>
-      Pick your name above and your forms &amp; logs open here.</div>;
-  }
-  if (!url) {
-    return <div style={{ ...box, color: MUTED, fontSize: 14, lineHeight: 1.5 }}>
-      No forms folder is set up for {opName || 'you'} yet — ask Damien to add one.</div>;
-  }
-  return (
-    <div style={{ animation: 'ar-pop .2s ease' }}>
-      <FieldLabel>Your forms &amp; logs</FieldLabel>
-      <a href={url} target="_blank" rel="noopener noreferrer"
-        style={{ ...btn(NAVY), display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, textDecoration: 'none' }}>
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.9">
-          <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" strokeLinejoin="round"/></svg>
-        Open my forms &amp; logs
-      </a>
-      <div style={{ marginTop: 16 }}>
-        <div style={{ fontSize: 12.5, fontWeight: 700, color: NAVY, letterSpacing: '0.02em',
-          textTransform: 'uppercase', marginBottom: 9 }}>Inside — keep these up to date</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-          {OPERATOR_LOG_LIST.map(n => (
-            <div key={n} style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#fff',
-              border: `1px solid ${LINE}`, borderRadius: 9, padding: '10px 13px', fontSize: 13.5, color: INK }}>
-              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke={NAVY} strokeWidth="1.6">
-                <rect x="3" y="2" width="10" height="12" rx="1.5"/><path d="M5.5 6h5M5.5 8.5h5M5.5 11h3" strokeLinecap="round"/></svg>
-              {n}
-            </div>
-          ))}
-        </div>
-      </div>
-      <div style={{ ...formStyles.hint, marginTop: 12 }}>Opens in Google Drive — sign in with your <b>@arealytics.com.au</b> account.</div>
-    </div>
-  );
-}
 
 const btn = (bg) => ({ background: bg, color: '#fff', fontWeight: 700, fontSize: 15.5,
   padding: '15px 22px', borderRadius: 12, letterSpacing: '0.01em' });
