@@ -140,8 +140,7 @@ function App() {
   const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'off' | 'repl' | 'extract'
   const [reason, setReason] = useState('');       // weather / blocker reason (when nofly)
   const [reasonOther, setReasonOther] = useState('');
-  const [coverImg, setCoverImg] = useState(null); // File — screenshot of today's flown area (marked/coloured)
-  const [coverUrl, setCoverUrl] = useState('');   // object URL for the preview thumbnail
+  const [covers, setCovers] = useState([]);       // [{ file, url }] — marked coverage screenshots (pilots fly MULTIPLE areas)
   const [area, setArea] = useState('');           // suburb / area / postcode(s) flown — required on a flying day
   const [files, setFiles] = useState([]);        // File[]
   const [decoded, setDecoded] = useState({});    // fkey -> { status, ...summary }
@@ -242,23 +241,25 @@ function App() {
   // Just an image; stored alongside the flight files so management can see WHAT was covered.
   const setCover = (list) => {
     if (status === 'submitting') return;   // frozen while uploading (see addFiles)
-    const img = Array.from(list || []).find(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|heic|gif)$/i.test(f.name));
-    if (!img) return;
-    if (coverUrl) { try { URL.revokeObjectURL(coverUrl); } catch (e) {} }
-    setCoverImg(img);
-    setCoverUrl(URL.createObjectURL(img));
+    const imgs = Array.from(list || []).filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|heic|gif)$/i.test(f.name));
+    if (!imgs.length) return;
+    setCovers(prev => [...prev, ...imgs.map(file => ({ file, url: URL.createObjectURL(file) }))]);
+    if (coverRef.current) coverRef.current.value = '';   // let the same file be picked again next time
   };
-  const clearCover = () => {
-    if (coverUrl) { try { URL.revokeObjectURL(coverUrl); } catch (e) {} }
-    setCoverImg(null); setCoverUrl('');
+  const removeCover = (i) => {
+    setCovers(prev => { const c = prev[i]; if (c && c.url) { try { URL.revokeObjectURL(c.url); } catch (e) {} } return prev.filter((_, j) => j !== i); });
+  };
+  const clearCovers = () => {
+    setCovers(prev => { prev.forEach(c => { if (c && c.url) { try { URL.revokeObjectURL(c.url); } catch (e) {} } }); return []; });
     if (coverRef.current) coverRef.current.value = '';
   };
-  // Name the coverage image so it sorts next to the day's flights in the operator's date folder.
-  const coverName = () => {
-    const m = coverImg && /\.([a-z0-9]+)$/i.exec(coverImg.name);
+  // Name each coverage image so they sort next to the day's flights; the index keeps multiple areas
+  // distinct in the operator's date folder (coverage-<date>-1.png, coverage-<date>-2.png, …).
+  const coverNameFor = (file, i) => {
+    const m = file && /\.([a-z0-9]+)$/i.exec(file.name);
     let ext = m ? m[1].toLowerCase() : 'png';
     if (ext === 'jpeg') ext = 'jpg';
-    return `coverage-${date}.${ext}`;
+    return `coverage-${date}-${i + 1}.${ext}`;
   };
 
   // The decoded CSV for a file (SRT / legacy TXT built in-browser; encrypted TXT already CSV
@@ -364,7 +365,7 @@ function App() {
     else if (anyDecoding) errors.push('Checking your files… one moment.');
     else if (anyError) errors.push('Remove the file(s) that couldn’t be read, then add the correct ones.');
     // Coverage screenshot is REQUIRED on a flying day — it's the visual record of the area flown.
-    if (!coverImg) errors.push('Add a coverage screenshot of the area you flew (marked & coloured).');
+    if (!covers.length) errors.push('Add at least one coverage screenshot of the area(s) you flew (marked & coloured).');
     // Suburb / area / postcode(s) is REQUIRED — every flying day must have a location on record.
     if (!area.trim()) errors.push('Enter the suburb / area / postcode(s) you flew.');
   }
@@ -390,7 +391,8 @@ function App() {
       day_type: dayType, flew: didFly,
       reason: dayType === 'nofly' ? reasonFinal : '',
       area_flown: didFly ? area.trim() : '',
-      coverage_image: (didFly && coverImg) ? coverName() : '',
+      coverage_images: (didFly && covers.length) ? covers.map((c, i) => coverNameFor(c.file, i)) : [],
+      coverage_image: (didFly && covers.length) ? coverNameFor(covers[0].file, 0) : '',   // first one, kept for the existing manifest reader
       decoded: didFly ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
         name: f.name, status: d.status || null, model: d.model || null, encrypted: !!d.encrypted,
         decrypted: !!d.decrypted, durationSec: d.durationSec || 0, samples: d.samples || 0,
@@ -499,17 +501,17 @@ function App() {
     // Coverage screenshot (the pilot's marked/coloured picture of what they flew). Tracked SEPARATELY
     // from the flight files: pushing its name into `failed` corrupted the N/M arithmetic + manifest semantics.
     let coverageFailed = false;
-    if (meta.flew && coverImg && meta.coverage_image) {
-      setProgress('Uploading coverage screenshot…');
+    // iPhone camera-roll images often arrive HEIC with an empty File.type — derive the mime from the
+    // stored filename's extension rather than mislabelling a .heic as PNG in Drive.
+    const coverMimeOf = (name, file) => file.type ||
+      ({ png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', heic: 'image/heic', gif: 'image/gif' }[(name.split('.').pop() || '').toLowerCase()] || 'application/octet-stream');
+    for (let ci = 0; meta.flew && ci < covers.length; ci++) {
+      setProgress(covers.length > 1 ? `Uploading coverage ${ci + 1} / ${covers.length}…` : 'Uploading coverage screenshot…');
       try {
-        const dataB64 = await fileToB64(coverImg);
-        // iPhone camera-roll images arrive as HEIC often with an empty File.type — derive the mime
-        // from the stored filename's extension rather than mislabelling a .heic as PNG in Drive.
-        const coverExt = (meta.coverage_image.split('.').pop() || '').toLowerCase();
-        const coverMime = coverImg.type ||
-          ({ png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', heic: 'image/heic', gif: 'image/gif' }[coverExt] || 'application/octet-stream');
+        const cname = meta.coverage_images[ci];
+        const dataB64 = await fileToB64(covers[ci].file);
         await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
-          name: meta.coverage_image, mimeType: coverMime, dataB64 });
+          name: cname, mimeType: coverMimeOf(cname, covers[ci].file), dataB64 });
       } catch (e) { coverageFailed = true; }
     }
     setProgress('Recording submission…');
@@ -560,11 +562,12 @@ function App() {
       }
       stored.push(rec);
     }
-    // Coverage screenshot alongside the day's files.
-    if (meta.flew && coverImg && meta.coverage_image) {
-      const ipath = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(meta.coverage_image)}`;
-      const up = await sb.storage.from(CONFIG.BUCKET).upload(ipath, coverImg, { upsert: false });
-      if (!up.error) stored.push({ name: meta.coverage_image, size: coverImg.size, path: ipath, kind: 'coverage' });
+    // Coverage screenshots alongside the day's files (pilots fly multiple areas).
+    for (let ci = 0; meta.flew && ci < covers.length; ci++) {
+      const cname = meta.coverage_images[ci], cfile = covers[ci].file;
+      const ipath = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(cname)}`;
+      const up = await sb.storage.from(CONFIG.BUCKET).upload(ipath, cfile, { upsert: false });
+      if (!up.error) stored.push({ name: cname, size: cfile.size, path: ipath, kind: 'coverage' });
     }
     setProgress('Recording submission\u2026');
     const { error: insErr } = await sb.from(CONFIG.TABLE).insert([{ ...meta, files: stored }]);
@@ -588,7 +591,7 @@ function App() {
     const csvFolder = zip.folder('decoded-csv');
     if (meta.flew) for (const f of files) { const csv = csvFor(f); if (csv) csvFolder.file(csvName(f.name), csv); }
     // coverage screenshot
-    if (meta.flew && coverImg && meta.coverage_image) zip.file(meta.coverage_image, coverImg);
+    if (meta.flew) covers.forEach((c, ci) => zip.file(meta.coverage_images[ci], c.file));
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -600,7 +603,7 @@ function App() {
   const reset = () => {
     setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setDayType('flew');
     csvCacheRef.current = {};   // free the memoised multi-MB CSV strings
-    clearCover(); setArea('');
+    clearCovers(); setArea('');
     dateTouchedRef.current = false;
     setSrtSaved('');   // stale "✓ saved" text would hide the save-to-card button on the next day's submission
     setStatus('idle'); setResult(null); setProgress(''); setDate(todayISO());
@@ -740,21 +743,14 @@ function App() {
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={NAVY} strokeWidth="1.7"
                 style={{ marginBottom: 6 }}><path d="M12 16V4M12 4 L7 9M12 4 L17 9" strokeLinecap="round" strokeLinejoin="round"/>
                 <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" strokeLinecap="round"/></svg>
-              {isDamien ? (
-                <>
-                  <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>Drop your <b>.SRT</b> & <b>.TXT</b> — Matrice 4E: drop the <b>.MP4</b> videos too</div>
-                  <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>Videos are read in place: the SRT is extracted here, only the telemetry uploads — never the video.</div>
-                  <div style={{ fontSize: 12.5, color: NAVY, marginTop: 6, fontWeight: 600 }}>
-                    Tip: drag the whole <b>card video folder</b> in and the extracted SRTs are written straight back into it. Dropped files instead? Use the “save to SD card” button after you submit.
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>Drop your <b>.SRT</b> & <b>.TXT</b> flight logs</div>
-                  <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>or tap to browse — one set per flight. SRT and TXT only; MP4 videos go through the VST tool.</div>
-                </>
-              )}
+              <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>Drop your <b>.SRT</b> & <b>.TXT</b> flight logs</div>
+              <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>or tap to browse — add every flight from today.</div>
             </div>
+            {isDamien && (
+              <div style={{ marginTop: 8, fontSize: 12.5, color: NAVY, background: '#EEF2FB', border: `1px solid ${LINE}`, borderRadius: 10, padding: '9px 12px', lineHeight: 1.5 }}>
+                <b>Matrice 4E:</b> drop the whole <b>card folder</b> (with the .MP4s) — the SRT is sniffed out of each video in place (the video never uploads) and written <b>straight back into that folder</b> after you submit, so VST has the MP4 + SRT together. In the embedded app it downloads a .zip instead — open in a browser tab for the direct card write.
+              </div>
+            )}
             {files.length > 0 && (
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 7 }}>
                 {files.map((f, i) => {
@@ -786,50 +782,54 @@ function App() {
               </div>
             )}
 
-            {/* coverage screenshot — the pilot's marked/coloured picture of what they flew today */}
+            {/* coverage screenshots — the pilot's marked/coloured pictures of what they flew (one per area) */}
             <div style={{ marginTop: 18 }}>
-              <FieldLabel done={!!coverImg}>Coverage screenshot{' '}
+              <FieldLabel done={covers.length > 0}>Coverage screenshots{' '}
                 <span style={{ color: ORANGE, fontWeight: 600, textTransform: 'none' }}>· required</span>
-                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · mark &amp; colour the area you flew</span>
+                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · one per area you flew</span>
               </FieldLabel>
-              {!coverImg ? (
-                <div onClick={() => coverRef.current && coverRef.current.click()}
-                  onDragOver={(e) => { e.preventDefault(); setCoverDrag(true); }}
-                  onDragLeave={() => setCoverDrag(false)}
-                  onDrop={(e) => { e.preventDefault(); setCoverDrag(false); setCover(e.dataTransfer.files); }}
-                  style={{ border: `1.5px dashed ${coverDrag ? NAVY : '#C7CCD9'}`, borderRadius: 13,
-                    background: coverDrag ? 'rgba(10,31,92,0.04)' : '#fff', padding: '18px', cursor: 'pointer',
-                    textAlign: 'center', transition: 'all .15s' }}>
-                  <input ref={coverRef} type="file" accept="image/*" hidden onChange={(e) => setCover(e.target.files)} />
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={NAVY} strokeWidth="1.7"
-                    style={{ marginBottom: 5 }}><rect x="3" y="4" width="18" height="15" rx="2"/>
-                    <circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l5-5 4 4 3-3 4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                  <div style={{ fontWeight: 700, color: INK, fontSize: 14.5 }}>Add a screenshot of today’s flown area</div>
-                  <div style={{ fontSize: 12.5, color: FAINT, marginTop: 3 }}>Outline &amp; colour where you captured — from Maps, your capture app, or a photo markup. One image.</div>
-                </div>
-              ) : (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff',
-                  border: `1px solid ${LINE}`, borderRadius: 11, padding: '10px 12px' }}>
-                  <img src={coverUrl} alt="coverage" style={{ width: 64, height: 48, objectFit: 'cover',
-                    borderRadius: 7, border: `1px solid ${LINE}`, flexShrink: 0 }} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13.5, color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{coverImg.name}</div>
-                    <div style={{ fontSize: 12, color: FAINT, fontFamily: '"JetBrains Mono", monospace' }}>{fmtBytes(coverImg.size)} · marked coverage</div>
-                  </div>
-                  <button onClick={() => coverRef.current && coverRef.current.click()}
-                    style={{ fontSize: 12.5, fontWeight: 700, color: NAVY, padding: '6px 10px', border: `1.5px solid ${LINE}`, borderRadius: 8 }}>Replace</button>
-                  <button onClick={clearCover} title="Remove" style={{ color: FAINT, fontSize: 18, lineHeight: 1, padding: '0 2px' }}>×</button>
+              <div onClick={() => coverRef.current && coverRef.current.click()}
+                onDragOver={(e) => { e.preventDefault(); setCoverDrag(true); }}
+                onDragLeave={() => setCoverDrag(false)}
+                onDrop={(e) => { e.preventDefault(); setCoverDrag(false); setCover(e.dataTransfer.files); }}
+                style={{ border: `1.5px dashed ${coverDrag ? NAVY : '#C7CCD9'}`, borderRadius: 13,
+                  background: coverDrag ? 'rgba(10,31,92,0.04)' : '#fff', padding: '18px', cursor: 'pointer',
+                  textAlign: 'center', transition: 'all .15s' }}>
+                <input ref={coverRef} type="file" accept="image/*" multiple hidden onChange={(e) => setCover(e.target.files)} />
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke={NAVY} strokeWidth="1.7"
+                  style={{ marginBottom: 5 }}><rect x="3" y="4" width="18" height="15" rx="2"/>
+                  <circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l5-5 4 4 3-3 4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                <div style={{ fontWeight: 700, color: INK, fontSize: 14.5 }}>{covers.length ? 'Add another area’s screenshot' : 'Add a screenshot of each area you flew'}</div>
+                <div style={{ fontSize: 12.5, color: FAINT, marginTop: 3 }}>Outline &amp; colour where you captured — from Maps, your capture app, or a photo markup. Add one per area.</div>
+              </div>
+              {covers.length > 0 && (
+                <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 7 }}>
+                  {covers.map((c, i) => (
+                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff',
+                      border: `1px solid ${LINE}`, borderRadius: 11, padding: '10px 12px' }}>
+                      <img src={c.url} alt="coverage" style={{ width: 64, height: 48, objectFit: 'cover',
+                        borderRadius: 7, border: `1px solid ${LINE}`, flexShrink: 0 }} />
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13.5, color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.file.name}</div>
+                        <div style={{ fontSize: 12, color: FAINT, fontFamily: '"JetBrains Mono", monospace' }}>{fmtBytes(c.file.size)} · area {i + 1}</div>
+                      </div>
+                      <button onClick={(e) => { e.stopPropagation(); removeCover(i); }} title="Remove" style={{ color: FAINT, fontSize: 18, lineHeight: 1, padding: '0 2px' }}>×</button>
+                    </div>
+                  ))}
+                  <div style={{ fontSize: 12, color: MUTED, fontFamily: '"JetBrains Mono", monospace', marginTop: 2 }}>
+                    {covers.length} screenshot{covers.length > 1 ? 's' : ''} · {covers.length} area{covers.length > 1 ? 's' : ''}</div>
                 </div>
               )}
             </div>
 
-            {/* area flown — REQUIRED so every flying day has a location on record */}
+            {/* areas flown — REQUIRED so every flying day has ALL its locations on record (pilots fly several) */}
             <div style={{ marginTop: 16 }}>
-              <FieldLabel done={!!area.trim()}>Suburb / area / postcode(s){' '}
+              <FieldLabel done={!!area.trim()}>Suburb(s) / area(s) / postcode(s){' '}
                 <span style={{ color: ORANGE, fontWeight: 600, textTransform: 'none' }}>· required</span>
+                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · list every area you flew</span>
               </FieldLabel>
-              <input className="ar-field" placeholder="e.g. Truganina 3029, Derrimut 3026"
-                style={formStyles.field} value={area} onChange={(e) => setArea(e.target.value)} />
+              <textarea className="ar-field" placeholder="List every area, e.g. Truganina 3029, Derrimut 3026, Sunshine 3020"
+                style={{ ...formStyles.field, minHeight: 62, resize: 'vertical', lineHeight: 1.5 }} value={area} onChange={(e) => setArea(e.target.value)} />
             </div>
 
           </div>
