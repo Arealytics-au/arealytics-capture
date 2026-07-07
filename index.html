@@ -193,6 +193,9 @@ function AreaAutocomplete({ cover, onChange, index }) {
   const wrap = { position: 'relative', flex: 1, minWidth: 0 };
   const menu = { position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 30, background: '#fff',
     border: `1px solid ${LINE}`, borderRadius: 10, boxShadow: '0 12px 30px rgba(14,19,32,0.16)', overflow: 'hidden', maxHeight: 224, overflowY: 'auto' };
+  // The postcode field is narrow (116px), so its dropdown must break out wider — anchored to its RIGHT
+  // edge and grown leftward — or the suburb names truncate to "Bal…". Capped so it never leaves the card.
+  const menuWide = { ...menu, left: 'auto', right: 0, width: 'min(280px, 78vw)' };
   const item = { padding: '9px 12px', fontSize: 14, color: INK, cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: 10 };
   const inp = { ...formStyles.field, padding: '10px 12px', fontSize: 14.5 };
   return (
@@ -223,12 +226,12 @@ function AreaAutocomplete({ cover, onChange, index }) {
           onFocus={() => setOpenField('postcode')}
           onBlur={() => setTimeout(() => setOpenField(f => f === 'postcode' ? null : f), 120)} />
         {openField === 'postcode' && sug.length > 0 && (
-          <div style={menu}>
+          <div style={menuWide}>
             {sug.map((r, k) => (
               <div key={k} style={item} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(r)}
                 onMouseEnter={(e) => e.currentTarget.style.background = '#F4F6FB'}
                 onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}>
-                <span style={{ fontFamily: '"JetBrains Mono", monospace' }}>{r.p}</span>
+                <span style={{ fontFamily: '"JetBrains Mono", monospace', flexShrink: 0 }}>{r.p}</span>
                 <span style={{ color: MUTED, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.s} {r.t}</span>
               </div>
             ))}
