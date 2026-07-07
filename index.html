@@ -30,6 +30,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <!-- In-browser DJI decoder: validates & summarises .SRT / .TXT on upload. -->
 <script src="flight-decoder.js?v=3"></script>
+<!-- AU suburb↔postcode table (offline) — powers the per-area autocomplete/cross-fill on the coverage screenshots. -->
+<script src="au-localities.js?b=1"></script>
 </head>
 <body>
 <img src="assets/arealytics-logo-full.png" style="display:none" alt="" id="__logo" />
@@ -126,6 +128,117 @@ function Logo() {
     onError={(e) => { e.target.style.display = 'none'; }} />;
 }
 
+// ---- AU suburb ↔ postcode lookup (from au-localities.js, parsed once) ----
+// Powers the coverage-screenshot cross-fill: type a suburb → postcode appears (and vice-versa).
+const AU_LOCS = (() => {
+  const raw = (typeof window !== 'undefined' && window.AU_LOCALITIES) || '';
+  const rows = [], byPost = new Map();
+  for (const line of raw.split('\n')) {
+    if (!line) continue;
+    const parts = line.split('|'); const s = parts[0], p = parts[1], t = parts[2] || '';
+    if (!s || !p) continue;
+    const rec = { s, p, t };
+    rows.push(rec);
+    if (!byPost.has(p)) byPost.set(p, []);
+    byPost.get(p).push(rec);
+  }
+  return { rows, byPost };
+})();
+// suburbs matching a typed name (prefix first, then contains), capped
+function suburbMatches(q, limit) {
+  limit = limit || 8; q = (q || '').trim().toLowerCase();
+  if (q.length < 2) return [];
+  const starts = [], contains = [];
+  for (const r of AU_LOCS.rows) {
+    const sl = r.s.toLowerCase();
+    if (sl.startsWith(q)) starts.push(r);
+    else if (contains.length < 30 && sl.indexOf(q) > 0) contains.push(r);
+  }
+  const out = starts.slice(0, limit);
+  if (out.length < limit) out.push(...contains.slice(0, limit - out.length));
+  return out;
+}
+// suburbs whose postcode STARTS WITH the typed digits (so 42 → 4207/4209/…)
+function postcodeMatches(p, limit) {
+  limit = limit || 8; p = (p || '').replace(/[^0-9]/g, '');
+  if (p.length < 2) return [];
+  const seen = new Set(), out = [];
+  for (const r of AU_LOCS.rows) {
+    if (r.p.indexOf(p) === 0) { const k = r.p + '|' + r.s; if (!seen.has(k)) { seen.add(k); out.push(r); } }
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+const suburbsAtPostcode = (p) => AU_LOCS.byPost.get((p || '').trim()) || [];
+
+// One coverage screenshot's tied location: Suburb + Postcode, each with autocomplete + cross-fill.
+function AreaAutocomplete({ cover, onChange, index }) {
+  const [openField, setOpenField] = useState(null);   // 'suburb' | 'postcode' | null
+  const sug = openField === 'suburb' ? suburbMatches(cover.suburb, 8)
+    : openField === 'postcode' ? postcodeMatches(cover.postcode, 8) : [];
+  const pick = (r) => { onChange({ suburb: r.s, postcode: r.p, state: r.t }); setOpenField(null); };
+  const onSuburb = (v) => {
+    const patch = { suburb: v };
+    const exact = AU_LOCS.rows.filter(r => r.s.toLowerCase() === v.trim().toLowerCase());
+    if (exact.length === 1) { patch.postcode = exact[0].p; patch.state = exact[0].t; }   // unique suburb → fill postcode
+    onChange(patch);
+  };
+  const onPostcode = (v) => {
+    v = v.replace(/[^0-9]/g, '').slice(0, 4);
+    const patch = { postcode: v };
+    if (v.length === 4) { const at = suburbsAtPostcode(v); if (at.length === 1) { patch.suburb = at[0].s; patch.state = at[0].t; } }
+    onChange(patch);
+  };
+  const tied = cover.suburb && cover.suburb.trim() && /^\d{4}$/.test((cover.postcode || '').trim());
+  const wrap = { position: 'relative', flex: 1, minWidth: 0 };
+  const menu = { position: 'absolute', top: 'calc(100% + 4px)', left: 0, right: 0, zIndex: 30, background: '#fff',
+    border: `1px solid ${LINE}`, borderRadius: 10, boxShadow: '0 12px 30px rgba(14,19,32,0.16)', overflow: 'hidden', maxHeight: 224, overflowY: 'auto' };
+  const item = { padding: '9px 12px', fontSize: 14, color: INK, cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: 10 };
+  const inp = { ...formStyles.field, padding: '10px 12px', fontSize: 14.5 };
+  return (
+    <div style={{ display: 'flex', gap: 8, marginTop: 9 }}>
+      <div style={wrap}>
+        <input className="ar-field" style={inp} placeholder={`Suburb / area — screenshot ${index + 1}`}
+          value={cover.suburb || ''} autoComplete="off"
+          onChange={(e) => onSuburb(e.target.value)}
+          onFocus={() => setOpenField('suburb')}
+          onBlur={() => setTimeout(() => setOpenField(f => f === 'suburb' ? null : f), 120)} />
+        {openField === 'suburb' && sug.length > 0 && (
+          <div style={menu}>
+            {sug.map((r, k) => (
+              <div key={k} style={item} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(r)}
+                onMouseEnter={(e) => e.currentTarget.style.background = '#F4F6FB'}
+                onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}>
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.s}</span>
+                <span style={{ color: MUTED, fontFamily: '"JetBrains Mono", monospace', flexShrink: 0 }}>{r.p} {r.t}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      <div style={{ ...wrap, flex: '0 0 116px' }}>
+        <input className="ar-field" style={inp} placeholder="Postcode" inputMode="numeric"
+          value={cover.postcode || ''} autoComplete="off"
+          onChange={(e) => onPostcode(e.target.value)}
+          onFocus={() => setOpenField('postcode')}
+          onBlur={() => setTimeout(() => setOpenField(f => f === 'postcode' ? null : f), 120)} />
+        {openField === 'postcode' && sug.length > 0 && (
+          <div style={menu}>
+            {sug.map((r, k) => (
+              <div key={k} style={item} onMouseDown={(e) => e.preventDefault()} onClick={() => pick(r)}
+                onMouseEnter={(e) => e.currentTarget.style.background = '#F4F6FB'}
+                onMouseLeave={(e) => e.currentTarget.style.background = '#fff'}>
+                <span style={{ fontFamily: '"JetBrains Mono", monospace' }}>{r.p}</span>
+                <span style={{ color: MUTED, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.s} {r.t}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [opId, setOpId] = useState(() => {
     // When embedded in the field app the operator is already signed in, so it passes ?op=op-<id>.
@@ -140,8 +253,7 @@ function App() {
   const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'off' | 'repl' | 'extract'
   const [reason, setReason] = useState('');       // weather / blocker reason (when nofly)
   const [reasonOther, setReasonOther] = useState('');
-  const [covers, setCovers] = useState([]);       // [{ file, url }] — marked coverage screenshots (pilots fly MULTIPLE areas)
-  const [area, setArea] = useState('');           // suburb / area / postcode(s) flown — required on a flying day
+  const [covers, setCovers] = useState([]);       // [{ file, url, suburb, postcode, state }] — each marked screenshot carries its OWN tied location (pilots fly MULTIPLE areas)
   const [files, setFiles] = useState([]);        // File[]
   const [decoded, setDecoded] = useState({});    // fkey -> { status, ...summary }
   // Ref, NOT state: it's read inside async decode callbacks (M4E extraction can run for minutes),
@@ -243,12 +355,14 @@ function App() {
     if (status === 'submitting') return;   // frozen while uploading (see addFiles)
     const imgs = Array.from(list || []).filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|heic|gif)$/i.test(f.name));
     if (!imgs.length) return;
-    setCovers(prev => [...prev, ...imgs.map(file => ({ file, url: URL.createObjectURL(file) }))]);
+    setCovers(prev => [...prev, ...imgs.map(file => ({ file, url: URL.createObjectURL(file), suburb: '', postcode: '', state: '' }))]);
     if (coverRef.current) coverRef.current.value = '';   // let the same file be picked again next time
   };
   const removeCover = (i) => {
     setCovers(prev => { const c = prev[i]; if (c && c.url) { try { URL.revokeObjectURL(c.url); } catch (e) {} } return prev.filter((_, j) => j !== i); });
   };
+  // Merge a suburb/postcode/state patch into one screenshot's tied location.
+  const updateCover = (i, patch) => setCovers(prev => prev.map((c, j) => j === i ? { ...c, ...patch } : c));
   const clearCovers = () => {
     setCovers(prev => { prev.forEach(c => { if (c && c.url) { try { URL.revokeObjectURL(c.url); } catch (e) {} } }); return []; });
     if (coverRef.current) coverRef.current.value = '';
@@ -366,8 +480,9 @@ function App() {
     else if (anyError) errors.push('Remove the file(s) that couldn’t be read, then add the correct ones.');
     // Coverage screenshot is REQUIRED on a flying day — it's the visual record of the area flown.
     if (!covers.length) errors.push('Add at least one coverage screenshot of the area(s) you flew (marked & coloured).');
-    // Suburb / area / postcode(s) is REQUIRED — every flying day must have a location on record.
-    if (!area.trim()) errors.push('Enter the suburb / area / postcode(s) you flew.');
+    // Every screenshot must carry its OWN suburb + postcode — that's the location tied to that photo.
+    else if (covers.some(c => !(c.suburb && c.suburb.trim()) || !/^\d{4}$/.test((c.postcode || '').trim())))
+      errors.push('Add the suburb and postcode next to each coverage screenshot.');
   }
   if (dayType === 'nofly' && !reason) errors.push('Pick why you couldn\u2019t fly.');
   if (dayType === 'nofly' && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
@@ -390,7 +505,12 @@ function App() {
       // existing dashboard ingest (which reads meta.flew) keeps working unchanged.
       day_type: dayType, flew: didFly,
       reason: dayType === 'nofly' ? reasonFinal : '',
-      area_flown: didFly ? area.trim() : '',
+      // Each coverage screenshot carries its OWN tied location. `areas` is the structured record
+      // (image ↔ suburb/postcode/state); `area_flown` is the joined free-text kept for the existing ingest.
+      areas: (didFly && covers.length) ? covers.map((c, i) => ({
+        image: coverNameFor(c.file, i), suburb: (c.suburb || '').trim(),
+        postcode: (c.postcode || '').trim(), state: c.state || '' })) : [],
+      area_flown: didFly ? covers.map(c => `${(c.suburb || '').trim()} ${(c.postcode || '').trim()}`.trim()).filter(Boolean).join(', ') : '',
       coverage_images: (didFly && covers.length) ? covers.map((c, i) => coverNameFor(c.file, i)) : [],
       coverage_image: (didFly && covers.length) ? coverNameFor(covers[0].file, 0) : '',   // first one, kept for the existing manifest reader
       decoded: didFly ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
@@ -603,7 +723,7 @@ function App() {
   const reset = () => {
     setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setDayType('flew');
     csvCacheRef.current = {};   // free the memoised multi-MB CSV strings
-    clearCovers(); setArea('');
+    clearCovers();
     dateTouchedRef.current = false;
     setSrtSaved('');   // stale "✓ saved" text would hide the save-to-card button on the next day's submission
     setStatus('idle'); setResult(null); setProgress(''); setDate(todayISO());
@@ -782,11 +902,11 @@ function App() {
               </div>
             )}
 
-            {/* coverage screenshots — the pilot's marked/coloured pictures of what they flew (one per area) */}
+            {/* coverage screenshots — each marked/coloured picture carries its OWN tied suburb + postcode */}
             <div style={{ marginTop: 18 }}>
-              <FieldLabel done={covers.length > 0}>Coverage screenshots{' '}
+              <FieldLabel done={covers.length > 0 && covers.every(c => c.suburb && c.suburb.trim() && /^\d{4}$/.test((c.postcode || '').trim()))}>Coverage screenshots{' '}
                 <span style={{ color: ORANGE, fontWeight: 600, textTransform: 'none' }}>· required</span>
-                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · one per area you flew</span>
+                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · one per area, with its suburb + postcode</span>
               </FieldLabel>
               <div onClick={() => coverRef.current && coverRef.current.click()}
                 onDragOver={(e) => { e.preventDefault(); setCoverDrag(true); }}
@@ -800,36 +920,29 @@ function App() {
                   style={{ marginBottom: 5 }}><rect x="3" y="4" width="18" height="15" rx="2"/>
                   <circle cx="8.5" cy="9.5" r="1.6"/><path d="M4 17l5-5 4 4 3-3 4 4" strokeLinecap="round" strokeLinejoin="round"/></svg>
                 <div style={{ fontWeight: 700, color: INK, fontSize: 14.5 }}>{covers.length ? 'Add another area’s screenshot' : 'Add a screenshot of each area you flew'}</div>
-                <div style={{ fontSize: 12.5, color: FAINT, marginTop: 3 }}>Outline &amp; colour where you captured — from Maps, your capture app, or a photo markup. Add one per area.</div>
+                <div style={{ fontSize: 12.5, color: FAINT, marginTop: 3 }}>Outline &amp; colour where you captured — from Maps, your capture app, or a photo markup. Add one per area, then tag its suburb + postcode below it.</div>
               </div>
               {covers.length > 0 && (
-                <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 7 }}>
+                <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 9 }}>
                   {covers.map((c, i) => (
-                    <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff',
-                      border: `1px solid ${LINE}`, borderRadius: 11, padding: '10px 12px' }}>
-                      <img src={c.url} alt="coverage" style={{ width: 64, height: 48, objectFit: 'cover',
-                        borderRadius: 7, border: `1px solid ${LINE}`, flexShrink: 0 }} />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13.5, color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.file.name}</div>
-                        <div style={{ fontSize: 12, color: FAINT, fontFamily: '"JetBrains Mono", monospace' }}>{fmtBytes(c.file.size)} · area {i + 1}</div>
+                    <div key={i} style={{ background: '#fff', border: `1px solid ${LINE}`, borderRadius: 11, padding: '11px 12px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                        <img src={c.url} alt="coverage" style={{ width: 64, height: 48, objectFit: 'cover',
+                          borderRadius: 7, border: `1px solid ${LINE}`, flexShrink: 0 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5, color: INK, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.file.name}</div>
+                          <div style={{ fontSize: 12, color: FAINT, fontFamily: '"JetBrains Mono", monospace' }}>{fmtBytes(c.file.size)} · area {i + 1}</div>
+                        </div>
+                        <button onClick={(e) => { e.stopPropagation(); removeCover(i); }} title="Remove" style={{ color: FAINT, fontSize: 18, lineHeight: 1, padding: '0 2px' }}>×</button>
                       </div>
-                      <button onClick={(e) => { e.stopPropagation(); removeCover(i); }} title="Remove" style={{ color: FAINT, fontSize: 18, lineHeight: 1, padding: '0 2px' }}>×</button>
+                      <AreaAutocomplete cover={c} index={i} onChange={(patch) => updateCover(i, patch)} />
                     </div>
                   ))}
                   <div style={{ fontSize: 12, color: MUTED, fontFamily: '"JetBrains Mono", monospace', marginTop: 2 }}>
-                    {covers.length} screenshot{covers.length > 1 ? 's' : ''} · {covers.length} area{covers.length > 1 ? 's' : ''}</div>
+                    {covers.length} screenshot{covers.length > 1 ? 's' : ''} · {covers.length} area{covers.length > 1 ? 's' : ''} · type a suburb or postcode — the other fills in
+                  </div>
                 </div>
               )}
-            </div>
-
-            {/* areas flown — REQUIRED so every flying day has ALL its locations on record (pilots fly several) */}
-            <div style={{ marginTop: 16 }}>
-              <FieldLabel done={!!area.trim()}>Suburb(s) / area(s) / postcode(s){' '}
-                <span style={{ color: ORANGE, fontWeight: 600, textTransform: 'none' }}>· required</span>
-                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · list every area you flew</span>
-              </FieldLabel>
-              <textarea className="ar-field" placeholder="List every area, e.g. Truganina 3029, Derrimut 3026, Sunshine 3020"
-                style={{ ...formStyles.field, minHeight: 62, resize: 'vertical', lineHeight: 1.5 }} value={area} onChange={(e) => setArea(e.target.value)} />
             </div>
 
           </div>
