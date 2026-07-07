@@ -550,17 +550,36 @@ function App() {
     });
   }
   async function postDrive(payload) {
-    // text/plain body => a "simple" request => no CORS preflight (Apps Script can't answer one).
-    const res = await fetch(CONFIG.DRIVE_ENDPOINT, { method: 'POST', body: JSON.stringify(payload), redirect: 'follow' });
-    // FAIL LOUD: an HTTP error, or a non-JSON body (Apps Script auth/quota pages and captive portals
-    // return HTML, often with status 200) must NEVER count as an upload. Only real JSON that doesn't
-    // say ok:false is a success.
-    if (!res.ok) throw new Error('Upload endpoint error (HTTP ' + res.status + ')');
-    let j;
-    try { j = await res.json(); }
-    catch (e) { throw new Error('Upload endpoint returned an unexpected (non-JSON) response — file NOT confirmed'); }
-    if (j && j.ok === false) throw new Error(j.error || 'Drive upload failed');
-    return j || { ok: true };
+    // The Apps Script writes the file server-side the moment this POST is DELIVERED. Its success reply,
+    // though, is served from a DIFFERENT Google domain (script.googleusercontent.com) that sends no CORS
+    // header — so the browser refuses to let us READ it, and that read-block was being mis-reported as an
+    // upload failure even though the file had already landed (operators saw a red error + re-submitted).
+    // So we DELIVER with mode:'no-cors' (the body still reaches doPost; the opaque reply is simply ignored)
+    // and confirm for real afterwards via verifyDrive() — a JSONP read that CORS does not block.
+    // A genuine network failure (offline / endpoint unreachable) still REJECTS here, so it's caught + retried.
+    await fetch(CONFIG.DRIVE_ENDPOINT, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
+    return { ok: true };   // "delivered", NOT "confirmed" — verifyDrive() is the source of truth
+  }
+  // Confirm what actually landed WITHOUT reading a CORS-blocked response: a <script> (JSONP) GET, which the
+  // browser never CORS-checks. The Apps Script's doGet answers ?verify=1&op=&date=&callback= with
+  // callback({files:[...names in that operator's date folder]}). Returns the name array, or null if the
+  // endpoint can't be reached / doesn't support verify yet (caller then treats the upload as delivered-unconfirmed,
+  // never as a hard failure — the files were still delivered).
+  function verifyDrive(operator, date) {
+    return new Promise((resolve) => {
+      const cb = '__arv' + Math.floor(performance.now()) + Math.floor(Math.random() * 1e6);
+      let done = false;
+      const s = document.createElement('script');
+      const cleanup = () => { try { delete window[cb]; } catch (e) { window[cb] = undefined; } if (s.parentNode) s.remove(); };
+      const finish = (val) => { if (done) return; done = true; cleanup(); resolve(val); };
+      window[cb] = (data) => finish(data && Array.isArray(data.files) ? data.files : null);
+      s.onerror = () => finish(null);
+      s.onload = () => finish(null);   // script loaded but callback never ran (endpoint doesn't support verify) -> unavailable, no 12s wait
+      const q = 'verify=1&op=' + encodeURIComponent(operator) + '&date=' + encodeURIComponent(date) + '&callback=' + cb;
+      s.src = CONFIG.DRIVE_ENDPOINT + (CONFIG.DRIVE_ENDPOINT.indexOf('?') === -1 ? '?' : '&') + q;
+      document.body.appendChild(s);
+      setTimeout(() => finish(null), 12000);   // verify unavailable -> null (delivered-unconfirmed)
+    });
   }
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   // Retry one upload a few times with backoff. SAFE to retry: the Apps Script de-dupes by filename
@@ -579,11 +598,13 @@ function App() {
     // aborts the rest (the old loop threw on the first failure, silently abandoning every file after
     // it — that's how a transient hiccup lost 6 of 10 flights). We collect failures and report exactly
     // which flights didn't make it so the operator can re-send them (re-sends are de-duped server-side).
-    const failed = [];
+    const failed = [];       // GENUINE delivery failures (offline/unreachable) + client-side impossibles
+    const attempted = [];     // names we DELIVERED — verifyDrive() confirms which of these actually landed
     if (meta.flew) {
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         const dec = decoded[fkey(f)] || {};
+        const upName = dec.extractedSrt ? f.name.replace(/\.(mp4|mov)$/i, '.srt') : f.name;
         // Apps Script POSTs cap out around 50MB and base64 inflates ×1.37 — a raw file >35MB can
         // never succeed, so fail it fast WITH the reason instead of burning 3 blind retries.
         if (!dec.extractedSrt && f.size > 35 * 1024 * 1024) {
@@ -599,13 +620,14 @@ function App() {
             // M4E video: telemetry was extracted in-browser — upload ONLY that (a few MB).
             // The multi-GB video never leaves this machine.
             await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
-              name: f.name.replace(/\.(mp4|mov)$/i, '.srt'), mimeType: 'application/x-subrip',
+              name: upName, mimeType: 'application/x-subrip',
               dataB64: btoa(unescape(encodeURIComponent(dec.extractedSrt))) });
           } else {
             const dataB64 = await fileToB64(f);
             await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
-              name: f.name, mimeType: f.type || 'application/octet-stream', dataB64 });
+              name: upName, mimeType: f.type || 'application/octet-stream', dataB64 });
           }
+          attempted.push(upName);
           // Decoded CSV sidecar — its OWN try/catch: the raw flight file above already landed, and
           // the CSV is re-derivable from it at bake time, so a CSV hiccup must not mark the FLIGHT failed.
           const csv = csvFor(f);
@@ -621,36 +643,54 @@ function App() {
         if (i < files.length - 1) await sleep(250);   // gentle pacing between POSTs (none after the last)
       }
     }
-    // Coverage screenshot (the pilot's marked/coloured picture of what they flew). Tracked SEPARATELY
-    // from the flight files: pushing its name into `failed` corrupted the N/M arithmetic + manifest semantics.
-    let coverageFailed = false;
-    // iPhone camera-roll images often arrive HEIC with an empty File.type — derive the mime from the
-    // stored filename's extension rather than mislabelling a .heic as PNG in Drive.
+    // Coverage screenshots. iPhone camera-roll images often arrive HEIC with an empty File.type —
+    // derive the mime from the stored filename's extension rather than mislabelling a .heic as PNG.
+    const coverFailed = [], coverAttempted = [];
     const coverMimeOf = (name, file) => file.type ||
       ({ png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', heic: 'image/heic', gif: 'image/gif' }[(name.split('.').pop() || '').toLowerCase()] || 'application/octet-stream');
     for (let ci = 0; meta.flew && ci < covers.length; ci++) {
       setProgress(covers.length > 1 ? `Uploading coverage ${ci + 1} / ${covers.length}…` : 'Uploading coverage screenshot…');
+      const cname = meta.coverage_images[ci];
       try {
-        const cname = meta.coverage_images[ci];
         const dataB64 = await fileToB64(covers[ci].file);
         await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
           name: cname, mimeType: coverMimeOf(cname, covers[ci].file), dataB64 });
-      } catch (e) { coverageFailed = true; }
+        coverAttempted.push(cname);
+      } catch (e) { coverFailed.push(cname); }
     }
     setProgress('Recording submission…');
     // The manifest is NOT "just a summary": on non-flying days it is the ENTIRE submission (no files
-    // upload), and on flying days it carries day_type/area/coverage/decoded. Its failure must surface.
-    let manifestErr = null;
+    // upload), and on flying days it carries day_type/area/coverage/decoded.
+    const manifestName = 'submission-' + meta.ref + '.json';
+    let manifestDelivered = true;
     try {
       await postDriveRetry({ action: 'manifest', operator: meta.operator, op_id: meta.op_id,
-        date: meta.capture_date, ref: meta.ref, meta: { ...meta, failed, coverage_failed: coverageFailed } });
-    } catch (e) { manifestErr = e; }
+        date: meta.capture_date, ref: meta.ref, meta: { ...meta, failed, coverage_failed: coverFailed.length > 0 } });
+    } catch (e) { manifestDelivered = false; }
+
+    // ── CONFIRM RECEIPT — the SOURCE OF TRUTH. Reads what actually landed via verifyDrive()'s JSONP call
+    //    (CORS-safe), replacing the old "read the POST's response" check that CORS blocked and mislabeled as
+    //    failure. Report ONLY files that genuinely didn't arrive; never cry wolf over an unreadable reply. ──
+    setProgress('Confirming receipt…');
+    const landed = await verifyDrive(meta.operator, meta.capture_date);
     const problems = [];
-    if (failed.length) problems.push(`${files.length - failed.length}/${files.length} flight files uploaded — ${failed.length} could not be sent: ${failed.join(', ')}.`);
-    if (coverageFailed) problems.push('The coverage screenshot could not be sent.');
-    if (manifestErr) problems.push('The day could not be recorded (the submission summary failed to send).');
+    if (landed) {
+      const has = new Set(landed);
+      const missFiles = attempted.filter(n => !has.has(n)).concat(failed);
+      const missCovers = coverAttempted.filter(n => !has.has(n)).concat(coverFailed);
+      const totalFiles = attempted.length + failed.length;
+      if (missFiles.length) problems.push(`${totalFiles - missFiles.length}/${totalFiles} flight files confirmed — not received: ${missFiles.join(', ')}.`);
+      if (missCovers.length) problems.push(`Coverage screenshot${missCovers.length > 1 ? 's' : ''} not received: ${missCovers.join(', ')}.`);
+      if (!has.has(manifestName)) problems.push('The day’s summary wasn’t recorded.');
+    } else {
+      // Verify unavailable (endpoint unreachable, or the verify endpoint isn't live yet). The files were
+      // still DELIVERED — only surface the GENUINE delivery failures we caught, never the CORS read-block.
+      const allFailed = failed.concat(coverFailed);
+      if (!manifestDelivered) problems.push('The day’s summary couldn’t be sent.');
+      if (allFailed.length) problems.push(`Couldn’t send: ${allFailed.join(', ')}.`);
+    }
     if (problems.length) {
-      const err = new Error(problems.join(' ') + ' Tap Submit again to re-send — files already uploaded are replaced server-side, not duplicated.');
+      const err = new Error(problems.join(' ') + ' Tap Submit again to re-send — anything already received is replaced, not duplicated.');
       err.failed = failed;
       throw err;                                 // surfaced on the error screen with the exact missing pieces
     }
