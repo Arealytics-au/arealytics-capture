@@ -949,7 +949,7 @@ function App() {
             <div style={{ marginTop: 18 }}>
               <FieldLabel done={covers.length > 0 && covers.every(c => c.suburb && c.suburb.trim() && /^\d{4}$/.test((c.postcode || '').trim()))}>Coverage screenshots{' '}
                 <span style={{ color: ORANGE, fontWeight: 600, textTransform: 'none' }}>· required</span>
-                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · one per area, with its suburb + postcode</span>
+                <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}> · one per area</span>
               </FieldLabel>
               <div onClick={() => coverRef.current && coverRef.current.click()}
                 onDragOver={(e) => { e.preventDefault(); setCoverDrag(true); }}
@@ -1083,7 +1083,7 @@ function App() {
 function FieldLabel({ done, children }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-      <span style={{ ...formStyles.label, marginBottom: 0, whiteSpace: 'nowrap' }}>{children}</span>
+      <span style={{ ...formStyles.label, marginBottom: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>{children}</span>
       {done && (
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, fontSize: 11, fontWeight: 700, color: '#0B8B43', textTransform: 'none', letterSpacing: 0 }}>
           <svg width="15" height="15" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8" fill="#0B8B43"/><path d="M4.5 8.3 L7 10.8 L11.6 5.5" stroke="#fff" strokeWidth="1.7" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
