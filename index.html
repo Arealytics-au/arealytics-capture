@@ -76,16 +76,21 @@ const CONFIG = {
 window.DECRYPT_ENDPOINT = CONFIG.DECRYPT_ENDPOINT;   // flight-decoder.js reads this
 
 // Roster — operators self-identify. Matches the dashboard roster.
+// Each operator carries their HOME STATE — it is authoritative for area attribution (a pilot
+// picking a same-named suburb from another state in the autocomplete must never re-state their
+// work: "always associate Paul with New South Wales" — Damien, 13 Jul 2026). The autocomplete
+// prefers home-state matches and the submission stamps the home state on every tagged area.
 const ROSTER = [
-  { id: 'op-marc',   name: 'Marc Margot' },
-  { id: 'op-paul',   name: 'Paul McConnell' },
-  { id: 'op-lucas',  name: 'Lucas Moy' },
-  { id: 'op-jakob',  name: 'Jakob Kelly' },
-  { id: 'op-damien', name: 'Damien Poole' },
-  { id: 'op-alex',   name: 'Alex Ballard' },
-  { id: 'op-joe',    name: 'Joe Arthey' },
-  { id: 'op-sam',    name: 'Sam' },
-  { id: 'op-justin', name: 'Justin' },
+  { id: 'op-marc',   name: 'Marc Margot',    state: 'NSW' },
+  { id: 'op-paul',   name: 'Paul McConnell', state: 'NSW' },
+  { id: 'op-lucas',  name: 'Lucas Moy',      state: 'VIC' },
+  { id: 'op-jakob',  name: 'Jakob Kelly',    state: 'VIC' },
+  { id: 'op-damien', name: 'Damien Poole',   state: 'QLD' },
+  { id: 'op-alex',   name: 'Alex Ballard',   state: 'NSW' },
+  { id: 'op-joe',    name: 'Joe Arthey',     state: 'WA' },
+  { id: 'op-rob',    name: 'Rob O’Brien', state: 'QLD' },
+  { id: 'op-sam',    name: 'Sam',            state: 'SA' },
+  { id: 'op-justin', name: 'Justin',         state: 'SA' },
 ];
 
 // Why a NON-FLYING, NON-STUDY, NON-OFF day happened. RePL study + Day off are now their own
@@ -144,8 +149,14 @@ const AU_LOCS = (() => {
   }
   return { rows, byPost };
 })();
-// suburbs matching a typed name (prefix first, then contains), capped
-function suburbMatches(q, limit) {
+// Stable-sort matches so the operator's HOME STATE lists first — same-named suburbs exist in
+// several states (Guildford NSW/TAS/WA) and pilots kept picking the wrong state's entry.
+function homeFirst(rows, home) {
+  if (!home) return rows;
+  return rows.filter(r => r.t === home).concat(rows.filter(r => r.t !== home));
+}
+// suburbs matching a typed name (prefix first, then contains), capped, home state first
+function suburbMatches(q, limit, home) {
   limit = limit || 8; q = (q || '').trim().toLowerCase();
   if (q.length < 2) return [];
   const starts = [], contains = [];
@@ -154,33 +165,37 @@ function suburbMatches(q, limit) {
     if (sl.startsWith(q)) starts.push(r);
     else if (contains.length < 30 && sl.indexOf(q) > 0) contains.push(r);
   }
-  const out = starts.slice(0, limit);
-  if (out.length < limit) out.push(...contains.slice(0, limit - out.length));
+  const out = homeFirst(starts, home).slice(0, limit);
+  if (out.length < limit) out.push(...homeFirst(contains, home).slice(0, limit - out.length));
   return out;
 }
-// suburbs whose postcode STARTS WITH the typed digits (so 42 → 4207/4209/…)
-function postcodeMatches(p, limit) {
+// suburbs whose postcode STARTS WITH the typed digits (so 42 → 4207/4209/…), home state first
+function postcodeMatches(p, limit, home) {
   limit = limit || 8; p = (p || '').replace(/[^0-9]/g, '');
   if (p.length < 2) return [];
   const seen = new Set(), out = [];
   for (const r of AU_LOCS.rows) {
     if (r.p.indexOf(p) === 0) { const k = r.p + '|' + r.s; if (!seen.has(k)) { seen.add(k); out.push(r); } }
-    if (out.length >= limit) break;
+    if (out.length >= 40) break;
   }
-  return out;
+  return homeFirst(out, home).slice(0, limit);
 }
 const suburbsAtPostcode = (p) => AU_LOCS.byPost.get((p || '').trim()) || [];
 
 // One coverage screenshot's tied location: Suburb + Postcode, each with autocomplete + cross-fill.
-function AreaAutocomplete({ cover, onChange, index }) {
+function AreaAutocomplete({ cover, onChange, index, home }) {
   const [openField, setOpenField] = useState(null);   // 'suburb' | 'postcode' | null
-  const sug = openField === 'suburb' ? suburbMatches(cover.suburb, 8)
-    : openField === 'postcode' ? postcodeMatches(cover.postcode, 8) : [];
+  const sug = openField === 'suburb' ? suburbMatches(cover.suburb, 8, home)
+    : openField === 'postcode' ? postcodeMatches(cover.postcode, 8, home) : [];
   const pick = (r) => { onChange({ suburb: r.s, postcode: r.p, state: r.t }); setOpenField(null); };
   const onSuburb = (v) => {
     const patch = { suburb: v };
+    // Unique-match auto-fill prefers the operator's HOME STATE: "Guildford" is NSW+TAS+WA, and
+    // Paul (NSW) must land on 2161 — never Tasmania's 7321 (13 Jul 2026).
     const exact = AU_LOCS.rows.filter(r => r.s.toLowerCase() === v.trim().toLowerCase());
-    if (exact.length === 1) { patch.postcode = exact[0].p; patch.state = exact[0].t; }   // unique suburb → fill postcode
+    const inHome = home ? exact.filter(r => r.t === home) : [];
+    const use = inHome.length === 1 ? inHome[0] : (exact.length === 1 ? exact[0] : null);
+    if (use) { patch.postcode = use.p; patch.state = use.t; }
     onChange(patch);
   };
   const onPostcode = (v) => {
@@ -556,8 +571,11 @@ function App() {
       // Each coverage screenshot carries its OWN tied location. `areas` is the structured record
       // (image ↔ suburb/postcode/state); `area_flown` is the joined free-text kept for the existing ingest.
       areas: (didFly && covers.length) ? covers.map((c, i) => ({
-        image: coverNameFor(c.file, i), suburb: (c.suburb || '').trim(),
-        postcode: (c.postcode || '').trim(), state: c.state || '' })) : [],
+        image: coverNameFor(c, i), suburb: (c.suburb || '').trim(),
+        // The OPERATOR'S home state is authoritative for attribution — a wrong-state autocomplete
+        // pick must never re-state their work. The picked state is kept as state_picked for trace.
+        postcode: (c.postcode || '').trim(), state: (op && op.state) || c.state || '',
+        state_picked: c.state || '' })) : [],
       area_flown: didFly ? covers.map(c => `${(c.suburb || '').trim()} ${(c.postcode || '').trim()}`.trim()).filter(Boolean).join(', ') : '',
       coverage_images: (didFly && covers.length) ? covers.map((c, i) => coverNameFor(c, i)) : [],
       coverage_image: (didFly && covers.length) ? coverNameFor(covers[0], 0) : '',   // first one, kept for the existing manifest reader
@@ -1046,7 +1064,7 @@ function App() {
                         </div>
                         <button onClick={(e) => { e.stopPropagation(); removeCover(i); }} title="Remove" style={{ color: FAINT, fontSize: 18, lineHeight: 1, padding: '0 2px' }}>×</button>
                       </div>
-                      <AreaAutocomplete cover={c} index={i} onChange={(patch) => updateCover(i, patch)} />
+                      <AreaAutocomplete cover={c} index={i} home={(op && op.state) || ''} onChange={(patch) => updateCover(i, patch)} />
                     </div>
                   ))}
                   <div style={{ fontSize: 12, color: MUTED, fontFamily: '"JetBrains Mono", monospace', marginTop: 2 }}>
