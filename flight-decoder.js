@@ -218,23 +218,60 @@
       if (onProgress) onProgress(Math.round(end / file.size * 100));
       await new Promise(r => setTimeout(r, 0));   // yield so the UI repaints
     }
+    return rawBlocksToNativeSrt(blocks);
+  }
+
+  /* ---- Reshape raw M4E telemetry blocks into the NATIVE DJI sidecar dialect. The M4E embeds
+     "FrameCnt: N <date> [fields]" (0-based, no comma, no <font>, no DiffTime) and downstream
+     tools — the VST media ingest above all — REJECT that as "[FrameCnt] absent in all frames".
+     Only the Air-style layout is accepted: <font size="28">FrameCnt: N, DiffTime: XXms /
+     timestamp on its own line / fields, 1-based. Every SRT this form emits MUST pass through
+     here (13 Jul 2026 — this was the last producer still writing the raw dialect). ---- */
+  const M4E_RAW_TS = /(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)/;
+  const M4E_RAW_HEAD = /^FrameCnt:\s*\d+\s+(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\s*([\s\S]*)$/;
+  function rawBlocksToNativeSrt(blocks) {
     const parsed = [];
-    for (const b of blocks) { const mm = b.match(M4E_TS); if (mm) parsed.push([Date.parse(mm[1].replace(' ', 'T')), b]); }
+    for (const b of blocks) { const mm = b.match(M4E_RAW_TS); if (mm) parsed.push([Date.parse(mm[1].replace(' ', 'T')), b]); }
     if (parsed.length < 2) return null;
     const t0 = parsed[0][0], pad = (n, w) => String(n).padStart(w, '0');
     const tc = (ms) => { let s = Math.max(0, (ms - t0) / 1000); return `${pad(Math.floor(s / 3600), 2)}:${pad(Math.floor(s % 3600 / 60), 2)}:${pad(Math.floor(s % 60), 2)},${pad(Math.round((s - Math.floor(s)) * 1000), 3)}`; };
     let out = '';
     for (let i = 0; i < parsed.length; i++) {
       const nt = i + 1 < parsed.length ? parsed[i + 1][0] : parsed[i][0] + 33;
-      out += `${i + 1}\n${tc(parsed[i][0])} --> ${tc(nt)}\n${parsed[i][1]}\n\n`;
+      const m = parsed[i][1].match(M4E_RAW_HEAD);
+      if (!m) continue;
+      const diff = Math.max(1, Math.round(i === 0 ? nt - parsed[i][0] : parsed[i][0] - parsed[i - 1][0]));
+      const fields = m[2].replace(/\s+/g, ' ').trim();
+      out += `${i + 1}\n${tc(parsed[i][0])} --> ${tc(nt)}\n<font size="28">FrameCnt: ${i + 1}, DiffTime: ${diff}ms\n${m[1]}\n${fields} </font>\n\n`;
     }
-    return out;
+    return out || null;
+  }
+  // A raw-dialect SRT from ANY outside tool (plain ffmpeg pull etc.) — normalise it too.
+  const isRawDialect = (text) => /FrameCnt: \d+ \d{4}-/.test(text) && !/<font size="28">FrameCnt: \d+,/.test(text);
+  function normalizeRawSrt(text) {
+    const RAW = /FrameCnt: \d+ \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+[\s\S]{0,500}?abs_alt: [-0-9.]+\]/g;
+    const blocks = []; let m;
+    while ((m = RAW.exec(text))) blocks.push(m[0].trim());
+    return blocks.length > 1 ? rawBlocksToNativeSrt(blocks) : null;
   }
 
   async function decode(file, onProgress) {
     const lower = (file.name || '').toLowerCase();
     try {
-      if (lower.endsWith('.srt')) return decodeSRT(await file.text(), file.name);
+      if (lower.endsWith('.srt')) {
+        const text = await file.text();
+        // BACKSTOP: an .srt in the raw M4E dialect (made by a plain ffmpeg pull or an old
+        // extractor) is normalised to the native sidecar dialect HERE, so the healed version
+        // is what gets uploaded — the raw one never reaches the Drive or the VST again.
+        if (isRawDialect(text)) {
+          const conv = normalizeRawSrt(text);
+          if (conv) {
+            const res = decodeSRT(conv, file.name);
+            if (res.ok) return Object.assign(res, { kind: 'M4E', model: 'Matrice 4E', extractedSrt: conv });
+          }
+        }
+        return decodeSRT(text, file.name);
+      }
       if (lower.endsWith('.mp4') || lower.endsWith('.mov')) {
         const srt = await extractM4eSrt(file, onProgress);
         if (!srt) return { ok: false, kind: 'M4E', name: file.name, error: 'No embedded telemetry in this video \u2014 only Matrice 4E videos carry it' };
