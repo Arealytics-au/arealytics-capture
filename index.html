@@ -265,6 +265,7 @@ function App() {
   const [notes, setNotes] = useState('');
   const [drag, setDrag] = useState(false);
   const [coverDrag, setCoverDrag] = useState(false);   // drag state for the coverage-image dropzone
+  const [coverErr, setCoverErr] = useState('');         // LOUD attach-time read failure (never wait for submit)
   const [status, setStatus] = useState('idle');  // idle | submitting | done | error
   const [progress, setProgress] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
@@ -354,12 +355,59 @@ function App() {
 
   // Coverage screenshot — the pilot's marked/coloured picture of the area they flew today.
   // Just an image; stored alongside the flight files so management can see WHAT was covered.
-  const setCover = (list) => {
+  //
+  // READ + COMPRESS AT ATTACH TIME. The old code kept only the File HANDLE and read the bytes at
+  // submit — a screenshot that went unreadable between attach and submit (iCloud-evicted Desktop
+  // file, stale picker handle) made every submit fail the same way with no clue why (13 Jul 2026:
+  // covers 2+3 "Couldn't send" across 3 submissions while 10MB SRTs sailed through). Reading HERE
+  // means an unreadable image fails LOUDLY the moment it's added, and submit never touches disk.
+  // Compressing (≤1800px JPEG) also cuts a 2–3MB phone screenshot to a few hundred KB.
+  const readCover = (file) => new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, 1800 / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+        const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+        const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(img, 0, 0, w, h);
+        const dataUrl = cv.toDataURL('image/jpeg', 0.85);
+        resolve({ url, b64: dataUrl.slice(dataUrl.indexOf(',') + 1), mime: 'image/jpeg', outExt: 'jpg' });
+      } catch (e) { URL.revokeObjectURL(url); reject(e); }
+    };
+    img.onerror = () => {
+      // Browser can't DECODE it (e.g. HEIC in some browsers) — still read the raw bytes NOW so
+      // submit never depends on the file handle. Only a failed read rejects.
+      const r = new FileReader();
+      r.onload = () => {
+        const s = String(r.result || '');
+        const m = /\.([a-z0-9]+)$/i.exec(file.name); let ext = m ? m[1].toLowerCase() : 'png';
+        if (ext === 'jpeg') ext = 'jpg';
+        resolve({ url, b64: s.slice(s.indexOf(',') + 1),
+          mime: file.type || ({ heic: 'image/heic', png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }[ext] || 'application/octet-stream'),
+          outExt: ext });
+      };
+      r.onerror = () => { URL.revokeObjectURL(url); reject(r.error || new Error('unreadable')); };
+      r.readAsDataURL(file);
+    };
+    img.src = url;
+  });
+  const setCover = async (list) => {
     if (status === 'submitting') return;   // frozen while uploading (see addFiles)
     const imgs = Array.from(list || []).filter(f => /^image\//.test(f.type) || /\.(png|jpe?g|webp|heic|gif)$/i.test(f.name));
     if (!imgs.length) return;
-    setCovers(prev => [...prev, ...imgs.map(file => ({ file, url: URL.createObjectURL(file), suburb: '', postcode: '', state: '' }))]);
     if (coverRef.current) coverRef.current.value = '';   // let the same file be picked again next time
+    const bad = [];
+    for (const file of imgs) {
+      try {
+        const got = await readCover(file);
+        setCovers(prev => [...prev, { file, url: got.url, b64: got.b64, mime: got.mime, outExt: got.outExt, suburb: '', postcode: '', state: '' }]);
+      } catch (e) { bad.push(file.name); }
+    }
+    setCoverErr(bad.length
+      ? `Couldn’t read ${bad.join(', ')} — it wasn’t added. If it’s still syncing (iCloud/Drive), open it once in Preview, then add it again.`
+      : '');
   };
   const removeCover = (i) => {
     setCovers(prev => { const c = prev[i]; if (c && c.url) { try { URL.revokeObjectURL(c.url); } catch (e) {} } return prev.filter((_, j) => j !== i); });
@@ -369,15 +417,12 @@ function App() {
   const clearCovers = () => {
     setCovers(prev => { prev.forEach(c => { if (c && c.url) { try { URL.revokeObjectURL(c.url); } catch (e) {} } }); return []; });
     if (coverRef.current) coverRef.current.value = '';
+    setCoverErr('');
   };
   // Name each coverage image so they sort next to the day's flights; the index keeps multiple areas
-  // distinct in the operator's date folder (coverage-<date>-1.png, coverage-<date>-2.png, …).
-  const coverNameFor = (file, i) => {
-    const m = file && /\.([a-z0-9]+)$/i.exec(file.name);
-    let ext = m ? m[1].toLowerCase() : 'png';
-    if (ext === 'jpeg') ext = 'jpg';
-    return `coverage-${date}-${i + 1}.${ext}`;
-  };
+  // distinct in the operator's date folder. Extension comes from what we actually STORED at attach
+  // time (compressed → .jpg; undecodable pass-through keeps its own ext).
+  const coverNameFor = (cover, i) => `coverage-${date}-${i + 1}.${(cover && cover.outExt) || 'jpg'}`;
 
   // The decoded CSV for a file (SRT / legacy TXT built in-browser; encrypted TXT already CSV
   // from the decrypt service). Returns null when there's no telemetry to write.
@@ -514,8 +559,8 @@ function App() {
         image: coverNameFor(c.file, i), suburb: (c.suburb || '').trim(),
         postcode: (c.postcode || '').trim(), state: c.state || '' })) : [],
       area_flown: didFly ? covers.map(c => `${(c.suburb || '').trim()} ${(c.postcode || '').trim()}`.trim()).filter(Boolean).join(', ') : '',
-      coverage_images: (didFly && covers.length) ? covers.map((c, i) => coverNameFor(c.file, i)) : [],
-      coverage_image: (didFly && covers.length) ? coverNameFor(covers[0].file, 0) : '',   // first one, kept for the existing manifest reader
+      coverage_images: (didFly && covers.length) ? covers.map((c, i) => coverNameFor(c, i)) : [],
+      coverage_image: (didFly && covers.length) ? coverNameFor(covers[0], 0) : '',   // first one, kept for the existing manifest reader
       decoded: didFly ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
         name: f.name, status: d.status || null, model: d.model || null, encrypted: !!d.encrypted,
         decrypted: !!d.decrypted, durationSec: d.durationSec || 0, samples: d.samples || 0,
@@ -533,7 +578,12 @@ function App() {
       // we already hold a writable handle, so no extra prompt. (File-drops use the button instead.)
       if (isDamien && srtDirRef.current && extractedSrts().length) saveSrtsToCard();
     } catch (e) {
-      setErrorMsg(String(e && e.message ? e.message : e));
+      const m = String(e && e.message ? e.message : e);
+      // A bare TypeError("Failed to fetch") means the service was unreachable — say that in
+      // operator language instead of browser-speak.
+      setErrorMsg(/failed to fetch|networkerror|load failed/i.test(m)
+        ? 'Couldn’t reach the upload service — check your connection and tap Submit again. Anything already received is replaced, not duplicated.'
+        : m);
       setStatus('error');
     } finally {
       submittingRef.current = false;
@@ -548,6 +598,14 @@ function App() {
       r.onerror = reject;
       r.readAsDataURL(file);
     });
+  }
+  // Rebuild a Blob from the base64 captured at attach time (bundle/hosted paths must not
+  // re-read file handles either — same stale-handle trap as the Drive path).
+  function b64ToBlob(b64, mime) {
+    const bin = atob(b64 || '');
+    const arr = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+    return new Blob([arr], { type: mime || 'application/octet-stream' });
   }
   async function postDrive(payload) {
     // The Apps Script writes the file server-side the moment this POST is DELIVERED. Its success reply,
@@ -652,11 +710,15 @@ function App() {
       setProgress(covers.length > 1 ? `Uploading coverage ${ci + 1} / ${covers.length}…` : 'Uploading coverage screenshot…');
       const cname = meta.coverage_images[ci];
       try {
-        const dataB64 = await fileToB64(covers[ci].file);
+        // Bytes were read + compressed AT ATTACH TIME — never re-read the file handle here (a
+        // handle gone stale between attach and submit is exactly what made covers fail while
+        // 10MB flight files succeeded). Only a genuine network failure can land in coverFailed now.
+        const dataB64 = covers[ci].b64 || (await fileToB64(covers[ci].file));   // legacy fallback only
         await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
-          name: cname, mimeType: coverMimeOf(cname, covers[ci].file), dataB64 });
+          name: cname, mimeType: covers[ci].mime || coverMimeOf(cname, covers[ci].file), dataB64 });
         coverAttempted.push(cname);
-      } catch (e) { coverFailed.push(cname); }
+      } catch (e) { coverFailed.push(cname + ' (network — check your connection)'); }
+      if (ci < covers.length - 1) await sleep(250);   // same gentle pacing as the flight files
     }
     setProgress('Recording submission…');
     // The manifest is NOT "just a summary": on non-flying days it is the ENTIRE submission (no files
@@ -725,12 +787,14 @@ function App() {
       }
       stored.push(rec);
     }
-    // Coverage screenshots alongside the day's files (pilots fly multiple areas).
+    // Coverage screenshots alongside the day's files (pilots fly multiple areas) — from the
+    // bytes captured at attach time, never a re-read of the file handle.
     for (let ci = 0; meta.flew && ci < covers.length; ci++) {
-      const cname = meta.coverage_images[ci], cfile = covers[ci].file;
+      const cname = meta.coverage_images[ci];
+      const cblob = covers[ci].b64 ? b64ToBlob(covers[ci].b64, covers[ci].mime) : covers[ci].file;
       const ipath = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(cname)}`;
-      const up = await sb.storage.from(CONFIG.BUCKET).upload(ipath, cfile, { upsert: false });
-      if (!up.error) stored.push({ name: cname, size: cfile.size, path: ipath, kind: 'coverage' });
+      const up = await sb.storage.from(CONFIG.BUCKET).upload(ipath, cblob, { upsert: false });
+      if (!up.error) stored.push({ name: cname, size: cblob.size, path: ipath, kind: 'coverage' });
     }
     setProgress('Recording submission\u2026');
     const { error: insErr } = await sb.from(CONFIG.TABLE).insert([{ ...meta, files: stored }]);
@@ -753,8 +817,8 @@ function App() {
     // decoded CSVs alongside the raw files
     const csvFolder = zip.folder('decoded-csv');
     if (meta.flew) for (const f of files) { const csv = csvFor(f); if (csv) csvFolder.file(csvName(f.name), csv); }
-    // coverage screenshot
-    if (meta.flew) covers.forEach((c, ci) => zip.file(meta.coverage_images[ci], c.file));
+    // coverage screenshots — attach-time bytes, not the (possibly stale) file handles
+    if (meta.flew) covers.forEach((c, ci) => zip.file(meta.coverage_images[ci], c.b64 ? b64ToBlob(c.b64, c.mime) : c.file));
     const blob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -965,6 +1029,10 @@ function App() {
                 <div style={{ fontWeight: 700, color: INK, fontSize: 14.5 }}>{covers.length ? 'Add another area’s screenshot' : 'Add a screenshot of each area you flew'}</div>
                 <div style={{ fontSize: 12.5, color: FAINT, marginTop: 3 }}>Outline &amp; colour where you captured — from Maps, your capture app, or a photo markup. Add one per area, then tag its suburb + postcode below it.</div>
               </div>
+              {coverErr && (
+                <div style={{ marginTop: 8, background: '#FCEBEA', border: '1px solid #E5B4AE', borderRadius: 9,
+                  padding: '9px 12px', fontSize: 12.5, color: '#9A2B1C', lineHeight: 1.45 }}>⚠ {coverErr}</div>
+              )}
               {covers.length > 0 && (
                 <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 9 }}>
                   {covers.map((c, i) => (
@@ -1040,7 +1108,7 @@ function App() {
         {/* submit */}
         {status === 'error' && (
           <div style={{ background: '#FCEBEA', border: '1px solid #E5B4AE', borderRadius: 10, padding: '11px 13px',
-            fontSize: 13.5, color: '#9A2B1C', lineHeight: 1.5 }}>Couldn’t send: {errorMsg}</div>
+            fontSize: 13.5, color: '#9A2B1C', lineHeight: 1.5 }}>{errorMsg}</div>
         )}
         <div>
           <button onClick={submit} disabled={!canSubmit}
