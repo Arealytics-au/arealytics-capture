@@ -636,12 +636,11 @@ function App() {
     await fetch(CONFIG.DRIVE_ENDPOINT, { method: 'POST', mode: 'no-cors', body: JSON.stringify(payload) });
     return { ok: true };   // "delivered", NOT "confirmed" — verifyDrive() is the source of truth
   }
-  // Confirm what actually landed WITHOUT reading a CORS-blocked response: a <script> (JSONP) GET, which the
-  // browser never CORS-checks. The Apps Script's doGet answers ?verify=1&op=&date=&callback= with
-  // callback({files:[...names in that operator's date folder]}). Returns the name array, or null if the
-  // endpoint can't be reached / doesn't support verify yet (caller then treats the upload as delivered-unconfirmed,
-  // never as a hard failure — the files were still delivered).
-  function verifyDrive(operator, date) {
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  // Single JSONP confirmation attempt (CORS-safe: a <script> GET the browser never CORS-checks).
+  // The Apps Script's doGet answers ?verify=1&op=&date=&callback= with callback({files:[...]}).
+  // Resolves the name array, or null if THIS attempt got no answer in time.
+  function verifyDriveOnce(operator, date, timeoutMs) {
     return new Promise((resolve) => {
       const cb = '__arv' + Math.floor(performance.now()) + Math.floor(Math.random() * 1e6);
       let done = false;
@@ -650,14 +649,28 @@ function App() {
       const finish = (val) => { if (done) return; done = true; cleanup(); resolve(val); };
       window[cb] = (data) => finish(data && Array.isArray(data.files) ? data.files : null);
       s.onerror = () => finish(null);
-      s.onload = () => finish(null);   // script loaded but callback never ran (endpoint doesn't support verify) -> unavailable, no 12s wait
+      s.onload = () => finish(null);   // script loaded but callback never ran this attempt
       const q = 'verify=1&op=' + encodeURIComponent(operator) + '&date=' + encodeURIComponent(date) + '&callback=' + cb;
       s.src = CONFIG.DRIVE_ENDPOINT + (CONFIG.DRIVE_ENDPOINT.indexOf('?') === -1 ? '?' : '&') + q;
       document.body.appendChild(s);
-      setTimeout(() => finish(null), 12000);   // verify unavailable -> null (delivered-unconfirmed)
+      setTimeout(() => finish(null), timeoutMs);
     });
   }
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  // Confirm what actually landed — the SOURCE OF TRUTH for the whole submission. A single missed
+  // attempt (a slow network, a momentary Apps Script blip) is NOT proof the endpoint is unreachable,
+  // so this retries before giving up. Only returns null once every attempt has failed to answer —
+  // the caller must treat that as UNCONFIRMED, never as silent success. (16 Jul 2026: a single verify
+  // miss was being read as "all good" and an operator's entire day's submission landed nowhere while
+  // they saw a clean success screen — this replaced that one-shot check.)
+  async function verifyDrive(operator, date) {
+    const timeouts = [5000, 7000, 12000];
+    for (let attempt = 0; attempt < timeouts.length; attempt++) {
+      const result = await verifyDriveOnce(operator, date, timeouts[attempt]);
+      if (result) return result;
+      if (attempt < timeouts.length - 1) await sleep(900);
+    }
+    return null;
+  }
   // Retry one upload a few times with backoff. SAFE to retry: the Apps Script de-dupes by filename
   // (removeExisting), so a re-sent file replaces rather than stacks. Throws only after all tries fail.
   async function postDriveRetry(payload, tries) {
@@ -763,15 +776,21 @@ function App() {
       if (missCovers.length) problems.push(`Coverage screenshot${missCovers.length > 1 ? 's' : ''} not received: ${missCovers.join(', ')}.`);
       if (!has.has(manifestName)) problems.push('The day’s summary wasn’t recorded.');
     } else {
-      // Verify unavailable (endpoint unreachable, or the verify endpoint isn't live yet). The files were
-      // still DELIVERED — only surface the GENUINE delivery failures we caught, never the CORS read-block.
+      // verifyDrive() exhausted every retry with no answer. This is NOT proof the files failed — they may
+      // well have landed — but it is equally not proof they did, so it must NEVER fall through to a plain
+      // "done" screen (that silent gap is exactly how a whole day's submission went missing while the
+      // operator saw success, 16 Jul 2026). Surfacing this every time costs an occasional unnecessary
+      // resubmit; staying silent costs a real, undetected gap in the compliance record. Resubmitting is
+      // always safe (server-side de-dupe by filename), so the safe default is to ask, not assume.
       const allFailed = failed.concat(coverFailed);
+      problems.push('Couldn’t confirm this submission was received — it may not have gone through.');
       if (!manifestDelivered) problems.push('The day’s summary couldn’t be sent.');
-      if (allFailed.length) problems.push(`Couldn’t send: ${allFailed.join(', ')}.`);
+      if (allFailed.length) problems.push(`Also couldn’t send: ${allFailed.join(', ')}.`);
     }
     if (problems.length) {
       const err = new Error(problems.join(' ') + ' Tap Submit again to re-send — anything already received is replaced, not duplicated.');
       err.failed = failed;
+      err.unconfirmed = !landed;
       throw err;                                 // surfaced on the error screen with the exact missing pieces
     }
   }
