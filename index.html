@@ -47,7 +47,7 @@
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useRef, useMemo } = React;
+const { useState, useRef, useMemo, useEffect } = React;
 
 /* ============================================================================
    ADMIN SETUP — fill these in once, then host this single file (the same file
@@ -304,6 +304,18 @@ function App() {
   })();
   const op = ROSTER.find(o => o.id === opId);
   const opName = opId === 'other' ? otherName.trim() : (op ? op.name : '');
+
+  // ReOC Duty & Fatigue logging — the field app appends &reoc=1 (mirroring its own
+  // window.REOC_ENABLED preview flag) only when Damien has switched ReOC preview on. Gated on
+  // THREE things: embedded (so the public standalone form is untouched), a verified locked
+  // identity (R2 — no self-declared operator name in a compliance register), and this flag —
+  // never shown by accident, never shown to anyone outside the signed-in field app.
+  const isEmbeddedFrame = window.self !== window.top;
+  const reocOn = (() => {
+    try { return new URLSearchParams(location.search).get('reoc') === '1'; }
+    catch (e) { return false; }
+  })();
+  const dutyOn = isEmbeddedFrame && nameLocked && reocOn;
 
   const totalBytes = useMemo(() => files.reduce((a, f) => a + f.size, 0), [files]);
 
@@ -1134,6 +1146,13 @@ function App() {
           </div>
         )}
 
+        {/* ReOC Duty & Fatigue — separate action from the flight submission above; entirely
+            independent so it can never interfere with the existing, working upload flow. */}
+        {dutyOn && (
+          <DutyPanel opId={opId} date={date}
+            suggestedFlightHours={decSec ? Math.round((decSec / 3600) * 10) / 10 : null} />
+        )}
+
         {/* notes */}
         <div>
           <label style={formStyles.label}>Notes for the day <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· optional</span></label>
@@ -1182,6 +1201,170 @@ function App() {
         </div>
       </div>
     </Shell>
+  );
+}
+
+// ReOC Duty & Fatigue log — a separate record from the flight-file submission above (its own
+// register, its own submit action). Sent via postMessage to the parent field-app page rather than
+// straight to the Drive endpoint: the parent holds the real Cloudflare Access session that gives
+// this row a CRYPTOGRAPHICALLY VERIFIED created_by (R2) — this iframe never sees or sets identity.
+function DutyPanel({ opId, date, suggestedFlightHours }) {
+  const [dutyStart, setDutyStart] = useState('');
+  const [dutyEnd, setDutyEnd] = useState('');
+  const [drivingHours, setDrivingHours] = useState('');
+  const [flightHours, setFlightHours] = useState('');
+  const [otherHours, setOtherHours] = useState('');
+  const [longestBlock, setLongestBlock] = useState('');
+  const [fitDeclared, setFitDeclared] = useState(false);
+  const [status, setStatus] = useState('idle');   // idle | sending | done | error
+  const [msg, setMsg] = useState('');
+  const pendingRef = useRef(null);   // { requestId, resolve } — the in-flight request awaiting the parent's reply
+
+  // Dictionary says flight_hours is "pre-filled from parsed telemetry where available, operator
+  // confirms rather than types" — seed it once from today's decoded files; the operator can still edit it.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (!seededRef.current && suggestedFlightHours != null) {
+      seededRef.current = true;
+      setFlightHours(String(suggestedFlightHours));
+    }
+  }, [suggestedFlightHours]);
+
+  useEffect(() => {
+    const onMsg = (e) => {
+      const d = e.data || {};
+      if (d.type !== 'reoc-duty-write-result') return;
+      const p = pendingRef.current;
+      if (!p || d.requestId !== p.requestId) return;
+      pendingRef.current = null;
+      p.resolve(d);
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  // Combine the capture DATE with a typed "HH:MM" in the operator's OWN local time, then serialise
+  // to a UTC instant — correct regardless of which state's timezone they're actually in (a WA
+  // operator's wall-clock 07:30 must not be misread against an eastern-states offset).
+  const toISO = (timeStr) => {
+    if (!timeStr || !date) return '';
+    const [h, m] = timeStr.split(':').map(Number);
+    const [y, mo, da] = date.split('-').map(Number);
+    const dt = new Date(y, (mo || 1) - 1, da || 1, h || 0, m || 0, 0);
+    return isNaN(dt.getTime()) ? '' : dt.toISOString();
+  };
+  const num = (v) => (v === '' || v == null ? NaN : Number(v));
+
+  const errors = [];
+  if (!dutyStart) errors.push('Duty start time');
+  if (!dutyEnd) errors.push('Duty end time');
+  if (isNaN(num(drivingHours)) || num(drivingHours) < 0 || num(drivingHours) > 12) errors.push('Driving hours (0–12)');
+  if (isNaN(num(flightHours)) || num(flightHours) < 0 || num(flightHours) > 8) errors.push('Flight hours (0–8)');
+  if (isNaN(num(otherHours)) || num(otherHours) < 0) errors.push('Other work hours');
+  if (isNaN(num(longestBlock)) || num(longestBlock) < 0) errors.push('Longest driving block');
+  if (!fitDeclared) errors.push('Fit-for-duty declaration');
+  const canSend = errors.length === 0 && status !== 'sending';
+
+  const submit = () => {
+    if (!canSend) return;
+    setStatus('sending'); setMsg('');
+    const requestId = 'duty' + Math.random().toString(36).slice(2, 10);
+    const payload = {
+      operator: opId, duty_date: date,
+      duty_start: toISO(dutyStart), duty_end: toISO(dutyEnd),
+      driving_hours: num(drivingHours), flight_hours: num(flightHours),
+      other_work_hours: num(otherHours), longest_driving_block: num(longestBlock),
+      fit_declaration: !!fitDeclared,
+    };
+    const timeoutId = setTimeout(() => {
+      if (pendingRef.current && pendingRef.current.requestId === requestId) {
+        pendingRef.current = null;
+        setStatus('error'); setMsg('No response from the compliance service — check your connection and try again.');
+      }
+    }, 15000);
+    pendingRef.current = {
+      requestId,
+      resolve: (d) => {
+        clearTimeout(timeoutId);
+        if (d.ok) { setStatus('done'); setMsg('Duty record saved' + (d.record_id ? ' · ' + d.record_id : '')); }
+        else { setStatus('error'); setMsg(d.error || 'Could not save — try again.'); }
+      },
+    };
+    // The relay on the PARENT page enforces the real trust boundary (it only accepts requests
+    // from this exact child origin and only forwards through the Access-verified fetch), so the
+    // target origin here just needs to reach whichever page actually framed us.
+    let targetOrigin = '*';
+    try { if (location.ancestorOrigins && location.ancestorOrigins[0]) targetOrigin = location.ancestorOrigins[0]; } catch (e) {}
+    window.parent.postMessage({ type: 'reoc-duty-write', requestId, payload,
+      source_form: 'daily-log-duty', device_ts: new Date().toISOString() }, targetOrigin);
+  };
+
+  const inp = { ...formStyles.field, padding: '11px 12px', fontSize: 14.5 };
+  return (
+    <div style={{ animation: 'ar-pop .25s ease' }}>
+      <div style={{ background: '#fff', border: `1.5px solid ${LINE}`, borderRadius: 13, padding: '16px 16px 14px' }}>
+        <div style={{ fontSize: 11.5, fontWeight: 800, color: NAVY, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 12 }}>
+          Duty &amp; Fatigue log · {prettyDate(date)}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <div>
+            <label style={{ ...formStyles.label, marginBottom: 6 }}>Duty start</label>
+            <input className="ar-field" style={inp} type="time" value={dutyStart} onChange={(e) => setDutyStart(e.target.value)} />
+          </div>
+          <div>
+            <label style={{ ...formStyles.label, marginBottom: 6 }}>Duty end</label>
+            <input className="ar-field" style={inp} type="time" value={dutyEnd} onChange={(e) => setDutyEnd(e.target.value)} />
+          </div>
+          <div>
+            <label style={{ ...formStyles.label, marginBottom: 6 }}>Driving hours</label>
+            <input className="ar-field" style={inp} type="number" min="0" max="12" step="0.1" value={drivingHours}
+              onChange={(e) => setDrivingHours(e.target.value)} placeholder="0.0" />
+          </div>
+          <div>
+            <label style={{ ...formStyles.label, marginBottom: 6 }}>Flight hours</label>
+            <input className="ar-field" style={inp} type="number" min="0" max="8" step="0.1" value={flightHours}
+              onChange={(e) => setFlightHours(e.target.value)} placeholder="0.0" />
+            {suggestedFlightHours != null && (
+              <div style={{ ...formStyles.hint, marginTop: 4 }}>From today’s flight logs: {suggestedFlightHours}h — adjust if needed.</div>
+            )}
+          </div>
+          <div>
+            <label style={{ ...formStyles.label, marginBottom: 6 }}>Other work hours</label>
+            <input className="ar-field" style={inp} type="number" min="0" step="0.1" value={otherHours}
+              onChange={(e) => setOtherHours(e.target.value)} placeholder="0.0" />
+          </div>
+          <div>
+            <label style={{ ...formStyles.label, marginBottom: 6 }}>Longest driving block</label>
+            <input className="ar-field" style={inp} type="number" min="0" step="0.1" value={longestBlock}
+              onChange={(e) => setLongestBlock(e.target.value)} placeholder="0.0" />
+          </div>
+        </div>
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginTop: 14, fontSize: 13.5, color: INK, cursor: 'pointer' }}>
+          <input type="checkbox" checked={fitDeclared} onChange={(e) => setFitDeclared(e.target.checked)}
+            style={{ marginTop: 2, width: 16, height: 16, flexShrink: 0 }} />
+          <span>I declare I am fit and rested for duty today.</span>
+        </label>
+        {status === 'error' && (
+          <div style={{ marginTop: 10, background: '#FCEBEA', border: '1px solid #E5B4AE', borderRadius: 9,
+            padding: '9px 12px', fontSize: 13, color: '#9A2B1C' }}>{msg}</div>
+        )}
+        {status === 'done' ? (
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: '#0B8B43', fontWeight: 600 }}>
+            <svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8" fill="#0B8B43"/><path d="M4.5 8.3 L7 10.8 L11.6 5.5" stroke="#fff" strokeWidth="1.7" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            {msg}
+          </div>
+        ) : (
+          <button onClick={submit} disabled={!canSend}
+            style={{ marginTop: 12, background: NAVY, color: '#fff', fontWeight: 700, fontSize: 14,
+              padding: '11px 18px', borderRadius: 10, opacity: canSend ? 1 : 0.5, cursor: canSend ? 'pointer' : 'not-allowed' }}>
+            {status === 'sending' ? 'Saving…' : 'Submit duty log'}
+          </button>
+        )}
+        {status !== 'sending' && status !== 'done' && errors.length > 0 && (dutyStart || dutyEnd || drivingHours || flightHours || fitDeclared) && (
+          <div style={{ marginTop: 8, fontSize: 12, color: FAINT }}>{errors.length} thing{errors.length > 1 ? 's' : ''} left: {errors.join(', ')}.</div>
+        )}
+      </div>
+    </div>
   );
 }
 
