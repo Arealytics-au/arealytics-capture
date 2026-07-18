@@ -1153,6 +1153,16 @@ function App() {
             suggestedFlightHours={decSec ? Math.round((decSec / 3600) * 10) / 10 : null} />
         )}
 
+        {/* ReOC Daily Risk Assessment — same trust pattern as the duty log (own card, own submit,
+            postMessage to the parent's Access-verified relay). Never touches the upload flow. */}
+        {dutyOn && (
+          <DraPanel opId={opId} date={date}
+            suggestedArea={(() => {
+              const c = covers.find((x) => x && x.suburb && x.suburb.trim());
+              return c ? c.suburb.trim() + (c.state ? ' ' + c.state : '') : null;
+            })()} />
+        )}
+
         {/* notes */}
         <div>
           <label style={formStyles.label}>Notes for the day <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· optional</span></label>
@@ -1361,6 +1371,160 @@ function DutyPanel({ opId, date, suggestedFlightHours }) {
           </button>
         )}
         {status !== 'sending' && status !== 'done' && errors.length > 0 && (dutyStart || dutyEnd || drivingHours || flightHours || fitDeclared) && (
+          <div style={{ marginTop: 8, fontSize: 12, color: FAINT }}>{errors.length} thing{errors.length > 1 ? 's' : ''} left: {errors.join(', ')}.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ReOC Daily Risk Assessment (DRA) — the pre-flight site risk record, one per operator per day.
+// Identical trust pattern to DutyPanel: this iframe never sees identity or the gateway; it posts the
+// payload to the parent field-app page, which holds the real Cloudflare Access session and relays it
+// to the compliance service. Server computes dra_id / fit_for_duty / any_site_hazard / needs_crp_ack.
+function DraPanel({ opId, date, suggestedArea }) {
+  const [area, setArea] = useState('');
+  const [airspaceOk, setAirspaceOk] = useState(false);
+  const [weatherOk, setWeatherOk] = useState(false);
+  const [fitnessOk, setFitnessOk] = useState(false);
+  const [hazards, setHazards] = useState('');
+  const [risk, setRisk] = useState('');
+  const [status, setStatus] = useState('idle');   // idle | sending | done | error
+  const [msg, setMsg] = useState('');
+  const pendingRef = useRef(null);
+
+  // Seed the area once from the first coverage screenshot's tied suburb — the operator confirms
+  // rather than retypes (same pattern as the duty log's flight-hours seed). Still fully editable.
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (!seededRef.current && suggestedArea) {
+      seededRef.current = true;
+      setArea(suggestedArea);
+    }
+  }, [suggestedArea]);
+
+  useEffect(() => {
+    const onMsg = (e) => {
+      const d = e.data || {};
+      if (d.type !== 'reoc-dra-write-result') return;
+      const p = pendingRef.current;
+      if (!p || d.requestId !== p.requestId) return;
+      pendingRef.current = null;
+      p.resolve(d);
+    };
+    window.addEventListener('message', onMsg);
+    return () => window.removeEventListener('message', onMsg);
+  }, []);
+
+  const RISKS = [
+    { v: 'low', label: 'Low — proceed as planned' },
+    { v: 'medium', label: 'Medium — proceed with controls in place' },
+    { v: 'high', label: 'High — controls required, CRP will be notified' },
+    { v: 'do_not_proceed', label: 'Do not proceed — unsafe to fly' },
+  ];
+
+  const errors = [];
+  if (!area.trim()) errors.push('Area / suburb being assessed');
+  if (!airspaceOk) errors.push('Airspace check (NOTAMs, DJI zones, controlled airspace)');
+  if (!weatherOk) errors.push('Weather check (wind, rain, forecast)');
+  if (!fitnessOk) errors.push('Pilot fitness & equipment serviceability check');
+  if (!RISKS.some((r) => r.v === risk)) errors.push('Risk decision');
+  const canSend = errors.length === 0 && status !== 'sending';
+  const flagged = risk === 'high' || risk === 'do_not_proceed' || !!hazards.trim();
+
+  const submit = () => {
+    if (!canSend) return;
+    setStatus('sending'); setMsg('');
+    const requestId = 'dra' + Math.random().toString(36).slice(2, 10);
+    const payload = {
+      operator: opId, dra_date: date, area: area.trim(),
+      airspace_checks: !!airspaceOk, weather_checks: !!weatherOk,
+      site_hazards: hazards.trim(), fitness_equipment: !!fitnessOk,
+      risk_decision: risk,
+    };
+    const timeoutId = setTimeout(() => {
+      if (pendingRef.current && pendingRef.current.requestId === requestId) {
+        pendingRef.current = null;
+        setStatus('error'); setMsg('No response from the compliance service — check your connection and try again.');
+      }
+    }, 15000);
+    pendingRef.current = {
+      requestId,
+      resolve: (d) => {
+        clearTimeout(timeoutId);
+        if (d.ok) { setStatus('done'); setMsg('Risk assessment saved' + (d.record_id ? ' · ' + d.record_id : '')); }
+        else { setStatus('error'); setMsg(d.error || 'Could not save — try again.'); }
+      },
+    };
+    let targetOrigin = '*';
+    try { if (location.ancestorOrigins && location.ancestorOrigins[0]) targetOrigin = location.ancestorOrigins[0]; } catch (e) {}
+    window.parent.postMessage({ type: 'reoc-dra-write', requestId, payload,
+      source_form: 'daily-log-dra', device_ts: new Date().toISOString() }, targetOrigin);
+  };
+
+  const inp = { ...formStyles.field, padding: '11px 12px', fontSize: 14.5 };
+  const check = (val, set, text) => (
+    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 9, fontSize: 13.5, color: INK, cursor: 'pointer' }}>
+      <input type="checkbox" checked={val} onChange={(e) => set(e.target.checked)}
+        style={{ marginTop: 2, width: 16, height: 16, flexShrink: 0 }} />
+      <span>{text}</span>
+    </label>
+  );
+  return (
+    <div style={{ animation: 'ar-pop .25s ease' }}>
+      <div style={{ background: '#fff', border: `1.5px solid ${LINE}`, borderRadius: 13, padding: '16px 16px 14px' }}>
+        <div style={{ fontSize: 11.5, fontWeight: 800, color: NAVY, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 12 }}>
+          Daily risk assessment · {prettyDate(date)}
+        </div>
+        <div>
+          <label style={{ ...formStyles.label, marginBottom: 6 }}>Area / suburb being assessed</label>
+          <input className="ar-field" style={inp} value={area} placeholder="e.g. Yatala QLD"
+            onChange={(e) => setArea(e.target.value)} />
+          {suggestedArea && area === suggestedArea && (
+            <div style={{ ...formStyles.hint, marginTop: 4 }}>From your coverage screenshot — adjust if you assessed a different area.</div>
+          )}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 14 }}>
+          {check(airspaceOk, setAirspaceOk, 'Airspace checked — NOTAMs, DJI fly-zones and controlled airspace for this area.')}
+          {check(weatherOk, setWeatherOk, 'Weather checked — wind, rain and the forecast window for the flight.')}
+          {check(fitnessOk, setFitnessOk, 'I am fit to operate and my aircraft, batteries and equipment are serviceable.')}
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <label style={{ ...formStyles.label, marginBottom: 6 }}>Site hazards <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· leave empty if none</span></label>
+          <textarea className="ar-field" style={{ ...inp, minHeight: 64, resize: 'vertical', lineHeight: 1.5 }}
+            placeholder="Powerlines, cranes, people on site, wildlife…"
+            value={hazards} onChange={(e) => setHazards(e.target.value)} />
+        </div>
+        <div style={{ marginTop: 14 }}>
+          <label style={{ ...formStyles.label, marginBottom: 6 }}>Risk decision</label>
+          <select className="ar-field" style={{ ...inp, appearance: 'auto' }} value={risk} onChange={(e) => setRisk(e.target.value)}>
+            <option value="" disabled>Choose the overall risk…</option>
+            {RISKS.map((r) => <option key={r.v} value={r.v}>{r.label}</option>)}
+          </select>
+        </div>
+        {flagged && status !== 'done' && (
+          <div style={{ marginTop: 10, background: '#FBF3E4', border: '1px solid #E7D3AC', borderRadius: 9,
+            padding: '9px 12px', fontSize: 13, color: '#8A5A0E' }}>
+            ◆ This assessment will be flagged to the Chief Remote Pilot for acknowledgement.
+          </div>
+        )}
+        {status === 'error' && (
+          <div style={{ marginTop: 10, background: '#FCEBEA', border: '1px solid #E5B4AE', borderRadius: 9,
+            padding: '9px 12px', fontSize: 13, color: '#9A2B1C' }}>{msg}</div>
+        )}
+        {status === 'done' ? (
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: '#0B8B43', fontWeight: 600 }}>
+            <svg width="16" height="16" viewBox="0 0 16 16"><circle cx="8" cy="8" r="8" fill="#0B8B43"/><path d="M4.5 8.3 L7 10.8 L11.6 5.5" stroke="#fff" strokeWidth="1.7" fill="none" strokeLinecap="round" strokeLinejoin="round"/></svg>
+            {msg}
+          </div>
+        ) : (
+          <button onClick={submit} disabled={!canSend}
+            style={{ marginTop: 12, background: NAVY, color: '#fff', fontWeight: 700, fontSize: 14,
+              padding: '11px 18px', borderRadius: 10, opacity: canSend ? 1 : 0.5, cursor: canSend ? 'pointer' : 'not-allowed' }}>
+            {status === 'sending' ? 'Saving…' : 'Submit risk assessment'}
+          </button>
+        )}
+        {status !== 'sending' && status !== 'done' && errors.length > 0 && (area || airspaceOk || weatherOk || fitnessOk || risk) && (
           <div style={{ marginTop: 8, fontSize: 12, color: FAINT }}>{errors.length} thing{errors.length > 1 ? 's' : ''} left: {errors.join(', ')}.</div>
         )}
       </div>
