@@ -980,6 +980,19 @@ function App() {
           <div style={formStyles.hint}>{prettyDate(date)}</div>
         </div>
 
+        {/* ReOC Daily Risk Assessment — the START-OF-DAY, PRE-FLIGHT record (Dictionary 2.8 / gate 3:
+            "no submitted DRA, no flight"). Sits ABOVE the capture flow because it is filled in the
+            MORNING before flying; the capture submission below stays the end-of-day touchpoint.
+            Same trust pattern as the duty log (own card, own submit, postMessage to the parent's
+            Access-verified relay). Never touches the upload flow. */}
+        {dutyOn && (
+          <DraPanel opId={opId} date={date}
+            suggestedArea={(() => {
+              const c = covers.find((x) => x && x.suburb && x.suburb.trim());
+              return c ? c.suburb.trim() + (c.state ? ' ' + c.state : '') : null;
+            })()} />
+        )}
+
         {/* day type — the one required choice each day; maps 1:1 to the reporting categories */}
         <div>
           <label style={formStyles.label}>What kind of day was it?</label>
@@ -1146,21 +1159,13 @@ function App() {
           </div>
         )}
 
-        {/* ReOC Duty & Fatigue — separate action from the flight submission above; entirely
-            independent so it can never interfere with the existing, working upload flow. */}
+        {/* ReOC Duty & Fatigue — the END-OF-DAY duty close (Dictionary 2.2 binds DUTY to this very
+            Daily Field Log submission; duty end + hours are only knowable now). Separate action from
+            the flight submission above; entirely independent so it can never interfere with the
+            existing, working upload flow. */}
         {dutyOn && (
           <DutyPanel opId={opId} date={date}
             suggestedFlightHours={decSec ? Math.round((decSec / 3600) * 10) / 10 : null} />
-        )}
-
-        {/* ReOC Daily Risk Assessment — same trust pattern as the duty log (own card, own submit,
-            postMessage to the parent's Access-verified relay). Never touches the upload flow. */}
-        {dutyOn && (
-          <DraPanel opId={opId} date={date}
-            suggestedArea={(() => {
-              const c = covers.find((x) => x && x.suburb && x.suburb.trim());
-              return c ? c.suburb.trim() + (c.state ? ' ' + c.state : '') : null;
-            })()} />
         )}
 
         {/* notes */}
@@ -1314,7 +1319,7 @@ function DutyPanel({ opId, date, suggestedFlightHours }) {
     <div style={{ animation: 'ar-pop .25s ease' }}>
       <div style={{ background: '#fff', border: `1.5px solid ${LINE}`, borderRadius: 13, padding: '16px 16px 14px' }}>
         <div style={{ fontSize: 11.5, fontWeight: 800, color: NAVY, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 12 }}>
-          Duty &amp; Fatigue log · {prettyDate(date)}
+          End of day · Duty &amp; Fatigue log · {prettyDate(date)}
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
           <div>
@@ -1352,7 +1357,7 @@ function DutyPanel({ opId, date, suggestedFlightHours }) {
         <label style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginTop: 14, fontSize: 13.5, color: INK, cursor: 'pointer' }}>
           <input type="checkbox" checked={fitDeclared} onChange={(e) => setFitDeclared(e.target.checked)}
             style={{ marginTop: 2, width: 16, height: 16, flexShrink: 0 }} />
-          <span>I declare I am fit and rested for duty today.</span>
+          <span>I declare I was fit and rested throughout today’s duty (per this morning’s risk assessment).</span>
         </label>
         {status === 'error' && (
           <div style={{ marginTop: 10, background: '#FCEBEA', border: '1px solid #E5B4AE', borderRadius: 9,
@@ -1378,29 +1383,69 @@ function DutyPanel({ opId, date, suggestedFlightHours }) {
   );
 }
 
-// ReOC Daily Risk Assessment (DRA) — the pre-flight site risk record, one per operator per day.
-// Identical trust pattern to DutyPanel: this iframe never sees identity or the gateway; it posts the
-// payload to the parent field-app page, which holds the real Cloudflare Access session and relays it
-// to the compliance service. Server computes dra_id / fit_for_duty / any_site_hazard / needs_crp_ack.
+// ReOC Daily Risk Assessment (DRA) — the START-OF-DAY, PRE-FLIGHT record, one per operator per
+// deployment day. Full DRA-01 v1.1 checklist (4 airspace + 5 weather + 7 site hazards with controls
+// + 6 fitness/equipment + risk decision with mitigations) — the register row is only worth anything
+// if it's filed BEFORE flying (every row is server-timestamped; CASA can compare against telemetry).
+// Same trust pattern as the duty log: this iframe never sees identity or the gateway; it posts the
+// payload to the parent field-app page, which holds the real Cloudflare Access session and relays it.
+// Server computes dra_id / fit_for_duty / any_site_hazard / needs_crp_ack.
+//
+// Column packing (register has ONE column per section): a section sends `true` only when every one
+// of its items is Yes; otherwise a compact "NO: <items>" string, so the register stays readable and
+// nothing is averaged away. Hazards marked present pack as "hazard: control | …" into site_hazards
+// (mitigations appended there too — DRA-01 s5 has mitigations but the register has no column for
+// them yet; flagged to the CRP as a dictionary amendment candidate).
 function DraPanel({ opId, date, suggestedArea }) {
+  const AIRSPACE = [
+    ['a1', 'Airspace checked via OpenSky / aalti.co / DJI Fly Safe', 'airspace not checked'],
+    ['a2', 'No controlled airspace conflicts at planned altitude', 'controlled airspace conflict'],
+    ['a3', 'No active TFRs or NOTAMs for the area and time window', 'active TFR/NOTAM'],
+    ['a4', 'No restricted areas (aerodrome proximity, emergency ops)', 'restricted area'],
+  ];
+  const WEATHER = [
+    ['w1', 'BOM forecast checked for the deployment zone', 'forecast not checked'],
+    ['w2', 'Wind below 25 km/h sustained, gusts below 35 km/h', 'wind above limits'],
+    ['w3', 'No rain, fog, or reduced visibility forecast', 'rain/fog/visibility'],
+    ['w4', 'No BOM heat health alert active', 'heat health alert'],
+    ['w5', 'Temperature within 0–40°C range', 'temperature out of range'],
+  ];
+  const HAZARDS = [
+    ['h1', 'Overhead power lines in operating area'],
+    ['h2', 'Construction or heavy machinery activity'],
+    ['h3', 'High foot traffic or gatherings of people'],
+    ['h4', 'Aggressive animals observed'],
+    ['h5', 'Uneven terrain or trip hazards at launch sites'],
+    ['h6', 'Limited mobile reception in area'],
+    ['h7', 'Other hazard'],
+  ];
+  const FITNESS = [
+    ['f1', 'Operator fit for duty (no impairment, adequate rest)', 'not fit for duty'],
+    ['f2', 'All batteries at 100%', 'batteries not full'],
+    ['f3', 'Aircraft inspected, no visible damage', 'aircraft not inspected/damaged'],
+    ['f4', 'SD card inserted, formatted, labelled', 'SD card not ready'],
+    ['f5', 'Water (min 1.5L), sunscreen, PPE carried', 'PPE/water not carried'],
+    ['f6', 'Hi-vis vest accessible if required', 'hi-vis not accessible'],
+  ];
+  const RISKS = [
+    { v: 'low', label: 'Low — proceed as planned' },
+    { v: 'medium', label: 'Medium — proceed with mitigations in place' },
+    { v: 'high', label: 'High — mitigations required, CRP must acknowledge before first flight' },
+    { v: 'do_not_proceed', label: 'Do not proceed — unsafe to fly' },
+  ];
+
   const [area, setArea] = useState('');
-  const [airspaceOk, setAirspaceOk] = useState(false);
-  const [weatherOk, setWeatherOk] = useState(false);
-  const [fitnessOk, setFitnessOk] = useState(false);
-  const [hazards, setHazards] = useState('');
+  const [ans, setAns] = useState({});           // itemId -> true | false
+  const [controls, setControls] = useState({}); // hazardId -> control measure text
   const [risk, setRisk] = useState('');
-  const [status, setStatus] = useState('idle');   // idle | sending | done | error
+  const [mitigations, setMitigations] = useState('');
+  const [status, setStatus] = useState('idle'); // idle | sending | done | error
   const [msg, setMsg] = useState('');
   const pendingRef = useRef(null);
 
-  // Seed the area once from the first coverage screenshot's tied suburb — the operator confirms
-  // rather than retypes (same pattern as the duty log's flight-hours seed). Still fully editable.
   const seededRef = useRef(false);
   useEffect(() => {
-    if (!seededRef.current && suggestedArea) {
-      seededRef.current = true;
-      setArea(suggestedArea);
-    }
+    if (!seededRef.current && suggestedArea) { seededRef.current = true; setArea(suggestedArea); }
   }, [suggestedArea]);
 
   useEffect(() => {
@@ -1416,30 +1461,43 @@ function DraPanel({ opId, date, suggestedArea }) {
     return () => window.removeEventListener('message', onMsg);
   }, []);
 
-  const RISKS = [
-    { v: 'low', label: 'Low — proceed as planned' },
-    { v: 'medium', label: 'Medium — proceed with controls in place' },
-    { v: 'high', label: 'High — controls required, CRP will be notified' },
-    { v: 'do_not_proceed', label: 'Do not proceed — unsafe to fly' },
-  ];
+  const setAnswer = (id, v) => setAns((a) => ({ ...a, [id]: v }));
+  const unfit = ans.f1 === false; // DRA-01 s4 / Dictionary: fit_for_duty false blocks submission
+  const noAirWx = AIRSPACE.concat(WEATHER).filter((it) => ans[it[0]] === false);
+  const hazardsPresent = HAZARDS.filter((it) => ans[it[0]] === true);
 
   const errors = [];
-  if (!area.trim()) errors.push('Area / suburb being assessed');
-  if (!airspaceOk) errors.push('Airspace check (NOTAMs, DJI zones, controlled airspace)');
-  if (!weatherOk) errors.push('Weather check (wind, rain, forecast)');
-  if (!fitnessOk) errors.push('Pilot fitness & equipment serviceability check');
+  if (!area.trim()) errors.push('Planned deployment area / suburb');
+  const unanswered = AIRSPACE.concat(WEATHER, FITNESS).filter((it) => ans[it[0]] === undefined).length +
+    HAZARDS.filter((it) => ans[it[0]] === undefined).length;
+  if (unanswered > 0) errors.push(unanswered + ' checklist item' + (unanswered > 1 ? 's' : '') + ' unanswered');
+  hazardsPresent.forEach((it) => {
+    if (!(controls[it[0]] || '').trim()) errors.push('Control measure for “' + it[1] + '”');
+  });
   if (!RISKS.some((r) => r.v === risk)) errors.push('Risk decision');
-  const canSend = errors.length === 0 && status !== 'sending';
-  const flagged = risk === 'high' || risk === 'do_not_proceed' || !!hazards.trim();
+  if ((risk === 'medium' || risk === 'high') && !mitigations.trim()) errors.push('Mitigations applied (required for medium/high)');
+  if (noAirWx.length && risk === 'low')
+    errors.push('A “No” on an airspace or weather check can’t be an overall Low — pick medium/high with mitigations, or do not proceed');
+  const canSend = errors.length === 0 && !unfit && status !== 'sending';
+  const flagged = risk === 'high' || risk === 'do_not_proceed' || hazardsPresent.length > 0;
+
+  const packSection = (items) => {
+    const nos = items.filter((it) => ans[it[0]] === false);
+    return nos.length === 0 ? true : 'NO: ' + nos.map((it) => it[2]).join('; ');
+  };
 
   const submit = () => {
     if (!canSend) return;
     setStatus('sending'); setMsg('');
     const requestId = 'dra' + Math.random().toString(36).slice(2, 10);
+    let hazStr = hazardsPresent.map((it) => it[1] + ': ' + (controls[it[0]] || '').trim()).join(' | ');
+    if (mitigations.trim()) hazStr = (hazStr ? hazStr + ' | ' : '') + 'mitigations: ' + mitigations.trim();
     const payload = {
       operator: opId, dra_date: date, area: area.trim(),
-      airspace_checks: !!airspaceOk, weather_checks: !!weatherOk,
-      site_hazards: hazards.trim(), fitness_equipment: !!fitnessOk,
+      airspace_checks: packSection(AIRSPACE),
+      weather_checks: packSection(WEATHER),
+      site_hazards: hazStr,
+      fitness_equipment: packSection(FITNESS),
       risk_decision: risk,
     };
     const timeoutId = setTimeout(() => {
@@ -1463,49 +1521,98 @@ function DraPanel({ opId, date, suggestedArea }) {
   };
 
   const inp = { ...formStyles.field, padding: '11px 12px', fontSize: 14.5 };
-  const check = (val, set, text) => (
-    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 9, fontSize: 13.5, color: INK, cursor: 'pointer' }}>
-      <input type="checkbox" checked={val} onChange={(e) => set(e.target.checked)}
-        style={{ marginTop: 2, width: 16, height: 16, flexShrink: 0 }} />
-      <span>{text}</span>
-    </label>
+  // Yes/No toggle — selection carries a glyph + label, never colour alone (colour-blind safe).
+  const yn = (id) => (
+    <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+      {[true, false].map((v) => {
+        const on = ans[id] === v;
+        return (
+          <button key={String(v)} onClick={() => setAnswer(id, v)} type="button"
+            style={{ padding: '5px 11px', borderRadius: 8, fontSize: 12, fontWeight: 800,
+              border: '1.5px solid ' + (on ? (v ? NAVY : '#B3540A') : '#C7CCD9'),
+              background: on ? (v ? NAVY : '#FFF6EE') : '#fff',
+              color: on ? (v ? '#fff' : '#B3540A') : '#8A93A6' }}>
+            {v ? '✓ YES' : '– NO'}
+          </button>
+        );
+      })}
+    </div>
   );
+  const item = (it, extra) => (
+    <div key={it[0]} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+      <span style={{ fontSize: 13.5, color: INK, lineHeight: 1.45, paddingTop: 3 }}>{it[1]}</span>
+      {yn(it[0])}
+      {extra || null}
+    </div>
+  );
+  const section = (title, children) => (
+    <div style={{ marginTop: 16 }}>
+      <div style={{ fontSize: 11, fontWeight: 800, color: '#5A6270', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 9 }}>{title}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>{children}</div>
+    </div>
+  );
+
   return (
     <div style={{ animation: 'ar-pop .25s ease' }}>
-      <div style={{ background: '#fff', border: `1.5px solid ${LINE}`, borderRadius: 13, padding: '16px 16px 14px' }}>
-        <div style={{ fontSize: 11.5, fontWeight: 800, color: NAVY, letterSpacing: '0.05em', textTransform: 'uppercase', marginBottom: 12 }}>
-          Daily risk assessment · {prettyDate(date)}
+      <div style={{ background: '#fff', border: `1.5px solid ${NAVY}`, borderRadius: 13, padding: '16px 16px 14px' }}>
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+          <span style={{ fontSize: 11.5, fontWeight: 800, color: NAVY, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
+            Start of day · Daily risk assessment
+          </span>
+          <span style={{ fontSize: 11, color: FAINT }}>{prettyDate(date)}</span>
         </div>
-        <div>
-          <label style={{ ...formStyles.label, marginBottom: 6 }}>Area / suburb being assessed</label>
+        <div style={{ fontSize: 12.5, color: MUTED, lineHeight: 1.5, marginBottom: 4 }}>
+          Fill this <b>before you fly</b> — it’s your pre-flight record (DRA-01). The capture upload below stays an end-of-day job.
+        </div>
+
+        <div style={{ marginTop: 12 }}>
+          <label style={{ ...formStyles.label, marginBottom: 6 }}>Planned deployment area / suburb</label>
           <input className="ar-field" style={inp} value={area} placeholder="e.g. Yatala QLD"
             onChange={(e) => setArea(e.target.value)} />
-          {suggestedArea && area === suggestedArea && (
-            <div style={{ ...formStyles.hint, marginTop: 4 }}>From your coverage screenshot — adjust if you assessed a different area.</div>
-          )}
         </div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 14 }}>
-          {check(airspaceOk, setAirspaceOk, 'Airspace checked — NOTAMs, DJI fly-zones and controlled airspace for this area.')}
-          {check(weatherOk, setWeatherOk, 'Weather checked — wind, rain and the forecast window for the flight.')}
-          {check(fitnessOk, setFitnessOk, 'I am fit to operate and my aircraft, batteries and equipment are serviceable.')}
-        </div>
-        <div style={{ marginTop: 14 }}>
-          <label style={{ ...formStyles.label, marginBottom: 6 }}>Site hazards <span style={{ color: FAINT, fontWeight: 500, textTransform: 'none' }}>· leave empty if none</span></label>
-          <textarea className="ar-field" style={{ ...inp, minHeight: 64, resize: 'vertical', lineHeight: 1.5 }}
-            placeholder="Powerlines, cranes, people on site, wildlife…"
-            value={hazards} onChange={(e) => setHazards(e.target.value)} />
-        </div>
-        <div style={{ marginTop: 14 }}>
-          <label style={{ ...formStyles.label, marginBottom: 6 }}>Risk decision</label>
+
+        {section('1 · Airspace assessment', AIRSPACE.map((it) => item(it)))}
+        {section('2 · Weather assessment', WEATHER.map((it) => item(it)))}
+        {section('3 · Site hazards — is it present?', HAZARDS.map((it) => (
+          <div key={it[0]}>
+            {item(it)}
+            {ans[it[0]] === true && (
+              <input className="ar-field" style={{ ...inp, marginTop: 7 }}
+                placeholder={it[0] === 'h7' ? 'Describe the hazard and your control measure' : 'Control measure for this hazard'}
+                value={controls[it[0]] || ''}
+                onChange={(e) => setControls((c) => ({ ...c, [it[0]]: e.target.value }))} />
+            )}
+          </div>
+        )))}
+        {section('4 · Fitness and equipment', FITNESS.map((it) => item(it)))}
+
+        {unfit && (
+          <div style={{ marginTop: 12, background: '#FCEBEA', border: '1.5px solid #E5B4AE', borderRadius: 10,
+            padding: '11px 13px', fontSize: 13.5, color: '#9A2B1C', lineHeight: 1.5 }}>
+            <b>Not fit for duty — do not fly today.</b> This assessment can’t be submitted while unfit.
+            Contact the Chief Remote Pilot now so the day is stood down properly.
+          </div>
+        )}
+
+        <div style={{ marginTop: 16 }}>
+          <label style={{ ...formStyles.label, marginBottom: 6 }}>5 · Overall risk decision</label>
           <select className="ar-field" style={{ ...inp, appearance: 'auto' }} value={risk} onChange={(e) => setRisk(e.target.value)}>
             <option value="" disabled>Choose the overall risk…</option>
             {RISKS.map((r) => <option key={r.v} value={r.v}>{r.label}</option>)}
           </select>
         </div>
-        {flagged && status !== 'done' && (
+        {(risk === 'medium' || risk === 'high') && (
+          <div style={{ marginTop: 10 }}>
+            <label style={{ ...formStyles.label, marginBottom: 6 }}>Mitigations applied</label>
+            <textarea className="ar-field" style={{ ...inp, minHeight: 56, resize: 'vertical', lineHeight: 1.5 }}
+              placeholder="What you’re doing about the elevated risk…"
+              value={mitigations} onChange={(e) => setMitigations(e.target.value)} />
+          </div>
+        )}
+        {flagged && status !== 'done' && !unfit && (
           <div style={{ marginTop: 10, background: '#FBF3E4', border: '1px solid #E7D3AC', borderRadius: 9,
             padding: '9px 12px', fontSize: 13, color: '#8A5A0E' }}>
-            ◆ This assessment will be flagged to the Chief Remote Pilot for acknowledgement.
+            ◆ This assessment will be flagged to the Chief Remote Pilot{risk === 'high' ? ' — high risk needs CRP acknowledgement before your first flight' : ''}.
           </div>
         )}
         {status === 'error' && (
@@ -1524,14 +1631,13 @@ function DraPanel({ opId, date, suggestedArea }) {
             {status === 'sending' ? 'Saving…' : 'Submit risk assessment'}
           </button>
         )}
-        {status !== 'sending' && status !== 'done' && errors.length > 0 && (area || airspaceOk || weatherOk || fitnessOk || risk) && (
+        {status !== 'sending' && status !== 'done' && !unfit && errors.length > 0 && (area || risk || Object.keys(ans).length > 0) && (
           <div style={{ marginTop: 8, fontSize: 12, color: FAINT }}>{errors.length} thing{errors.length > 1 ? 's' : ''} left: {errors.join(', ')}.</div>
         )}
       </div>
     </div>
   );
 }
-
 function FieldLabel({ done, children }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
