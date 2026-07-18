@@ -985,13 +985,7 @@ function App() {
             MORNING before flying; the capture submission below stays the end-of-day touchpoint.
             Same trust pattern as the duty log (own card, own submit, postMessage to the parent's
             Access-verified relay). Never touches the upload flow. */}
-        {dutyOn && (
-          <DraPanel opId={opId} date={date}
-            suggestedArea={(() => {
-              const c = covers.find((x) => x && x.suburb && x.suburb.trim());
-              return c ? c.suburb.trim() + (c.state ? ' ' + c.state : '') : null;
-            })()} />
-        )}
+        {dutyOn && <DraPanel opId={opId} date={date} />}
 
         {/* day type — the one required choice each day; maps 1:1 to the reporting categories */}
         <div>
@@ -1396,7 +1390,11 @@ function DutyPanel({ opId, date, suggestedFlightHours }) {
 // nothing is averaged away. Hazards marked present pack as "hazard: control | …" into site_hazards
 // (mitigations appended there too — DRA-01 s5 has mitigations but the register has no column for
 // them yet; flagged to the CRP as a dictionary amendment candidate).
-function DraPanel({ opId, date, suggestedArea }) {
+// NOTE: no area pre-fill here on purpose. This card is filled in the MORNING, before flying, so the
+// coverage screenshots that could name a suburb don't exist yet — the operator types the area they
+// PLAN to deploy to. (An earlier version seeded from those screenshots; after the day-split that seed
+// could never fire, so it's gone rather than left as dead, misleading code.)
+function DraPanel({ opId, date }) {
   const AIRSPACE = [
     ['a1', 'Airspace checked via OpenSky / aalti.co / DJI Fly Safe', 'airspace not checked'],
     ['a2', 'No controlled airspace conflicts at planned altitude', 'controlled airspace conflict'],
@@ -1442,11 +1440,6 @@ function DraPanel({ opId, date, suggestedArea }) {
   const [status, setStatus] = useState('idle'); // idle | sending | done | error
   const [msg, setMsg] = useState('');
   const pendingRef = useRef(null);
-
-  const seededRef = useRef(false);
-  useEffect(() => {
-    if (!seededRef.current && suggestedArea) { seededRef.current = true; setArea(suggestedArea); }
-  }, [suggestedArea]);
 
   useEffect(() => {
     const onMsg = (e) => {
