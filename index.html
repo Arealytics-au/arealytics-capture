@@ -305,17 +305,25 @@ function App() {
   const op = ROSTER.find(o => o.id === opId);
   const opName = opId === 'other' ? otherName.trim() : (op ? op.name : '');
 
-  // ReOC Duty & Fatigue logging — the field app appends &reoc=1 (mirroring its own
-  // window.REOC_ENABLED preview flag) only when Damien has switched ReOC preview on. Gated on
-  // THREE things: embedded (so the public standalone form is untouched), a verified locked
-  // identity (R2 — no self-declared operator name in a compliance register), and this flag —
-  // never shown by accident, never shown to anyone outside the signed-in field app.
+  // ReOC compliance cards (duty log + daily risk assessment) — the field app appends &reoc=1
+  // (mirroring its own window.REOC_ENABLED preview flag) only when Damien has switched ReOC preview
+  // on. Gated on THREE things: embedded (so the public standalone form is untouched), a KNOWN
+  // roster operator (R2 — never a self-declared free-text name in a compliance register), and the
+  // flag — never shown by accident, never shown to anyone outside the signed-in field app.
+  //
+  // Deliberately keyed on `opOnRoster`, NOT on nameLocked. The field app omits &lock=1 for the
+  // OWNER (so Damien can act as any operator), which meant the compliance cards silently vanished
+  // for the one person who needs them most — the CRP filing his own duty and risk records. `lock`
+  // is a UI affordance for the name field; it is not the identity boundary. The real identity check
+  // is the gateway's Cloudflare Access JWT, which stamps created_by server-side and cannot be
+  // forged from here, and the operator id must still resolve against the roster.
   const isEmbeddedFrame = window.self !== window.top;
+  const opOnRoster = !!opId && ROSTER.some((o) => o.id === opId);
   const reocOn = (() => {
     try { return new URLSearchParams(location.search).get('reoc') === '1'; }
     catch (e) { return false; }
   })();
-  const dutyOn = isEmbeddedFrame && nameLocked && reocOn;
+  const dutyOn = isEmbeddedFrame && opOnRoster && reocOn;
 
   const totalBytes = useMemo(() => files.reduce((a, f) => a + f.size, 0), [files]);
 
