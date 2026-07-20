@@ -598,7 +598,7 @@ function App() {
     try {
       if (driveOn) await submitDrive(meta);
       else await submitBundle(meta);
-      setResult({ ref, mode: driveOn ? 'drive' : 'bundle' });
+      setResult({ ref, mode: driveOn ? 'drive' : 'bundle', recorded: driveRecorded });
       setStatus('done');
       // Damien: if he dropped the card's folder, write the SRTs straight back into it now —
       // we already hold a writable handle, so no extra prompt. (File-drops use the button instead.)
@@ -690,6 +690,71 @@ function App() {
     }
     throw lastErr;
   }
+  // SHA-256 of a file, hex. This is what binds an uploaded file to the AUTHENTICATED manifest:
+  // the files themselves upload straight to the Apps Script (unchanged — that path is deliberately
+  // resilient, one file at a time with retries, after a hiccup once lost 6 of 10 flights), but the
+  // manifest goes through the Access-verified gateway carrying these digests. A file that is later
+  // substituted, or one uploaded by someone forging the endpoint, will not match any signed manifest.
+  async function sha256Hex(blob) {
+    try {
+      const buf = await blob.arrayBuffer();
+      const d = await crypto.subtle.digest('SHA-256', buf);
+      return Array.from(new Uint8Array(d)).map(b => b.toString(16).padStart(2, '0')).join('');
+    } catch (e) {
+      return '';   // never block a submission on hashing — an unhashed file is flagged, not lost
+    }
+  }
+
+  // AUTHENTICATED SUBMISSION RECORD.
+  //
+  // The files upload straight to the Apps Script, which authenticates nothing — anyone holding that
+  // /exec URL (it ships in a PUBLIC repo) could POST a submission as any operator on any date. So the
+  // EVIDENCE of a submission is filed separately, through the Access-verified compliance gateway:
+  // the parent field-app page holds the real Cloudflare Access session and relays it, exactly as it
+  // already does for the duty log and the daily risk assessment.
+  //
+  // What that buys, and it is the whole point: the SERVER decides who submitted (created_by comes
+  // from the verified Access identity, never from this payload), the record gets a unique id, a
+  // timestamp and an append-only audit row, and it carries the SHA-256 of every file delivered. A
+  // file substituted afterwards, or a submission forged straight at the uploader, will not match.
+  //
+  // Standalone (not embedded) there IS no Access session, so this cannot be filed. It fails LOUD
+  // rather than pretending: the operator is told the files landed but the record did not.
+  function relaySubmission(meta, digests, coverCount) {
+    return new Promise((resolve) => {
+      if (window.parent === window) {
+        resolve({ ok: false, error: 'not signed in — open the daily log from the Arealytics field app so the submission can be recorded' });
+        return;
+      }
+      const requestId = 'subm' + Math.random().toString(36).slice(2, 10);
+      const timeoutId = setTimeout(() => {
+        window.removeEventListener('message', onReply);
+        resolve({ ok: false, error: 'no response from the compliance service' });
+      }, 20000);
+      function onReply(e) {
+        const d = e.data || {};
+        if (d.type !== 'capture-submission-write-result' || d.requestId !== requestId) return;
+        clearTimeout(timeoutId);
+        window.removeEventListener('message', onReply);
+        resolve(d.ok ? { ok: true, record_id: d.record_id } : { ok: false, error: d.error || 'rejected' });
+      }
+      window.addEventListener('message', onReply);
+      let targetOrigin = '*';
+      try { if (location.ancestorOrigins && location.ancestorOrigins[0]) targetOrigin = location.ancestorOrigins[0]; } catch (e) {}
+      window.parent.postMessage({
+        type: 'capture-submission-write', requestId,
+        source_form: 'daily-field-log', device_ts: new Date().toISOString(),
+        payload: {
+          operator: meta.op_id, capture_date: meta.capture_date,
+          flew: !!meta.flew, reason: meta.reason || '', ref: meta.ref || '',
+          file_count: digests.length, coverage_count: coverCount || 0,
+          digests: digests,
+        },
+      }, targetOrigin);
+    });
+  }
+
+  let driveRecorded = null;   // result of the authenticated submission record, read by the result screen
   async function submitDrive(meta) {
     // RESILIENT upload: each file is uploaded independently with retry, and one file failing NEVER
     // aborts the rest (the old loop threw on the first failure, silently abandoning every file after
@@ -697,6 +762,7 @@ function App() {
     // which flights didn't make it so the operator can re-send them (re-sends are de-duped server-side).
     const failed = [];       // GENUINE delivery failures (offline/unreachable) + client-side impossibles
     const attempted = [];     // names we DELIVERED — verifyDrive() confirms which of these actually landed
+    const digests = [];       // {name, sha256, bytes} per delivered file — carried on the AUTHENTICATED manifest
     if (meta.flew) {
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
@@ -716,13 +782,16 @@ function App() {
           if (dec.extractedSrt) {
             // M4E video: telemetry was extracted in-browser — upload ONLY that (a few MB).
             // The multi-GB video never leaves this machine.
+            const srtBlob = new Blob([dec.extractedSrt], { type: 'application/x-subrip' });
             await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
               name: upName, mimeType: 'application/x-subrip',
               dataB64: btoa(unescape(encodeURIComponent(dec.extractedSrt))) });
+            digests.push({ name: upName, sha256: await sha256Hex(srtBlob), bytes: srtBlob.size });
           } else {
             const dataB64 = await fileToB64(f);
             await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
               name: upName, mimeType: f.type || 'application/octet-stream', dataB64 });
+            digests.push({ name: upName, sha256: await sha256Hex(f), bytes: f.size });
           }
           attempted.push(upName);
           // Decoded CSV sidecar — its OWN try/catch: the raw flight file above already landed, and
@@ -766,8 +835,16 @@ function App() {
     let manifestDelivered = true;
     try {
       await postDriveRetry({ action: 'manifest', operator: meta.operator, op_id: meta.op_id,
-        date: meta.capture_date, ref: meta.ref, meta: { ...meta, failed, coverage_failed: coverFailed.length > 0 } });
+        date: meta.capture_date, ref: meta.ref,
+        meta: { ...meta, failed, coverage_failed: coverFailed.length > 0, digests } });
     } catch (e) { manifestDelivered = false; }
+
+    // File the AUTHENTICATED record of this submission. Deliberately AFTER the uploads: the record
+    // states what was actually delivered, so it must not be written before delivery is known.
+    // Its failure never fails the submission — the files are already safely in Drive — but it is
+    // reported, because an unrecorded submission is a hole in the evidence chain, not a detail.
+    const recorded = await relaySubmission(meta, digests, coverAttempted.length);
+    driveRecorded = recorded;
 
     // ── CONFIRM RECEIPT — the SOURCE OF TRUTH. Reads what actually landed via verifyDrive()'s JSONP call
     //    (CORS-safe), replacing the old "read the POST's response" check that CORS blocked and mislabeled as
