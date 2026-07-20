@@ -24,8 +24,6 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
-<!-- Hosted submission backend (file uploads). Loaded for the Supabase path. -->
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 <!-- Zero-setup fallback: bundle the day's files into one downloadable package. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <!-- In-browser DJI decoder: validates & summarises .SRT / .TXT on upload. -->
@@ -50,27 +48,20 @@
 const { useState, useRef, useMemo, useEffect } = React;
 
 /* ============================================================================
-   ADMIN SETUP — fill these in once, then host this single file (the same file
-   is served to every operator). Leave blank to use the download-package
-   fallback (operators send you one file you drop into the dashboard).
+   ADMIN SETUP — one value. Submissions go straight into Google Drive.
 
-   Supabase (free · https://supabase.com): create a project → Storage → create a
-   PUBLIC bucket named below → Table editor → create table `submissions`
-   (columns: operator text, op_id text, state text, city text, capture_date date,
-   flew bool, reason text, notes text, files jsonb, ref text, created_at timestamptz
-   default now()). In Storage + Table policies, allow anon INSERT/UPLOAD.
-   Paste the Project URL and the anon public key (Settings → API) below.
+   DRIVE_ENDPOINT is the Apps Script Web app /exec URL (see drive-upload/DEPLOY.md).
+   Files land in  Flight Logs / Operator Uploads / <Operator> / <capture date> /
+   and the nightly bake reads them from there.
+
+   Leave it blank ONLY to fall back to download-package mode, where the operator
+   gets a single .zip to send you and you drop it into the dashboard.
    ============================================================================ */
 const CONFIG = {
   // PRIMARY now: files go straight into your Google Drive "Flight Logs" folder,
   // sorted by operator + date, via the Apps Script you deploy (see drive-upload/DEPLOY.md).
   // Paste the Web app /exec URL here to turn it on.
   DRIVE_ENDPOINT: 'https://script.google.com/macros/s/AKfycbwGPAWdqDcadMudMcoqmC7MZQAteHQgM1pRr2U45NxevLBJ1WDt6EeNST6YCLiKxknq/exec',
-  // Optional legacy backend (only used if DRIVE_ENDPOINT is blank):
-  SUPABASE_URL: 'https://jpqbgfhlypopekwgbdfe.supabase.co',
-  SUPABASE_ANON_KEY: 'sb_publishable_yLqecgI7777jlmAXBmeTkA_F9MSLrby',
-  BUCKET: 'flight-files',
-  TABLE: 'submissions',
   DECRYPT_ENDPOINT: '',     // your deployed decrypt-service URL + /decrypt (encrypted .TXT → CSV)
 };
 window.DECRYPT_ENDPOINT = CONFIG.DECRYPT_ENDPOINT;   // flight-decoder.js reads this
@@ -294,7 +285,6 @@ function App() {
   const [srtSaved, setSrtSaved] = useState('');   // status line for the write-back
 
   const driveOn = !!CONFIG.DRIVE_ENDPOINT;
-  const configured = driveOn || !!(CONFIG.SUPABASE_URL && CONFIG.SUPABASE_ANON_KEY);
   // The field app appends &lock=1 for a VERIFIED operator (from the Cloudflare sign-in) — lock the name to
   // them so nobody can submit as another operator. Only applies with a valid ?op; standalone use stays editable.
   const nameLocked = (() => {
@@ -607,9 +597,8 @@ function App() {
     };
     try {
       if (driveOn) await submitDrive(meta);
-      else if (configured) await submitSupabase(meta);
       else await submitBundle(meta);
-      setResult({ ref, mode: driveOn ? 'drive' : (configured ? 'hosted' : 'bundle') });
+      setResult({ ref, mode: driveOn ? 'drive' : 'bundle' });
       setStatus('done');
       // Damien: if he dropped the card's folder, write the SRTs straight back into it now —
       // we already hold a writable handle, so no extra prompt. (File-drops use the button instead.)
@@ -814,48 +803,6 @@ function App() {
     }
   }
 
-  async function submitSupabase(meta) {
-    const sb = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
-    const stored = [];
-    // Supabase Storage keys allow only [A-Za-z0-9._-] (plus '/'). DJI .txt app logs
-    // are named with brackets/spaces, e.g. DJIFlightRecord_..._[10-15-00].txt, which
-    // Storage rejects as an "Invalid key". Sanitise the key for upload, but keep the
-    // ORIGINAL filename in the row's `files` metadata so the owner sees the real name.
-    const keySafe = (s) => String(s).replace(/[^A-Za-z0-9._-]/g, '_');
-    // Files only on FLYING days — mirrors the Drive path (a flew→off switch leaves stale files in state).
-    for (let i = 0; meta.flew && i < files.length; i++) {
-      const f = files[i];
-      setProgress(`Uploading ${i + 1} / ${files.length} \u00b7 ${f.name}`);
-      // M4E video: upload only the in-browser-extracted telemetry, never the video bytes.
-      const dec = decoded[fkey(f)] || {};
-      const upName = dec.extractedSrt ? f.name.replace(/\.(mp4|mov)$/i, '.srt') : f.name;
-      const upBody = dec.extractedSrt ? new Blob([dec.extractedSrt], { type: 'application/x-subrip' }) : f;
-      const path = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(upName)}`;
-      const { error } = await sb.storage.from(CONFIG.BUCKET).upload(path, upBody, { upsert: false });
-      if (error) throw new Error('File upload failed: ' + error.message);
-      const rec = { name: upName, size: upBody.size, path };
-      // Also upload the decoded CSV alongside the raw file, when we have telemetry.
-      const csv = csvFor(f);
-      if (csv) {
-        const cpath = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(csvName(f.name))}`;
-        const up = await sb.storage.from(CONFIG.BUCKET).upload(cpath, new Blob([csv], { type: 'text/csv' }), { upsert: false });
-        if (!up.error) rec.csvPath = cpath;
-      }
-      stored.push(rec);
-    }
-    // Coverage screenshots alongside the day's files (pilots fly multiple areas) — from the
-    // bytes captured at attach time, never a re-read of the file handle.
-    for (let ci = 0; meta.flew && ci < covers.length; ci++) {
-      const cname = meta.coverage_images[ci];
-      const cblob = covers[ci].b64 ? b64ToBlob(covers[ci].b64, covers[ci].mime) : covers[ci].file;
-      const ipath = `${meta.capture_date}/${meta.op_id}/${Date.now()}_${keySafe(cname)}`;
-      const up = await sb.storage.from(CONFIG.BUCKET).upload(ipath, cblob, { upsert: false });
-      if (!up.error) stored.push({ name: cname, size: cblob.size, path: ipath, kind: 'coverage' });
-    }
-    setProgress('Recording submission\u2026');
-    const { error: insErr } = await sb.from(CONFIG.TABLE).insert([{ ...meta, files: stored }]);
-    if (insErr) throw new Error('Could not record the submission: ' + insErr.message);
-  }
 
   async function submitBundle(meta) {
     setProgress('Packaging your files\u2026');
@@ -1688,11 +1635,11 @@ function Shell({ children, opFirst }) {
 
         {/* REMOVED 20 Jul 2026 — the "For the manager / admin" setup panel.
             Two reasons, and the first is the serious one.
-            1. IT WAS WRONG. It told operators "files upload to your Supabase bucket and a row is
-               written to your submissions table". They do not. Submissions POST to the Apps Script
-               uploader and land in Google Drive under Flight Logs / Operator Uploads. The Supabase
-               branch (submitSupabase) is unreachable: the submit checks `driveOn` first and
-               DRIVE_ENDPOINT is set, so that path has never run in production.
+            1. IT WAS WRONG. It told operators their files went to a Supabase bucket. They do not.
+               Submissions POST to the Apps Script uploader and land in Google Drive under
+               Flight Logs / Operator Uploads. That second backend was unreachable code and has
+               now been removed outright (20 Jul 2026) - Drive already answered the question it
+               was answering, and two answers to one question is how the panel came to lie.
             2. It was setup scaffolding from the generic template this form started as — instructions
                for configuring a backend, shown on the tool operators use every day in the field.
             Nothing operational was removed; the panel only described configuration. */}
