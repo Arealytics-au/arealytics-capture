@@ -872,6 +872,13 @@ function App() {
       if (!manifestDelivered) problems.push('The day’s summary couldn’t be sent.');
       if (allFailed.length) problems.push(`Also couldn’t send: ${allFailed.join(', ')}.`);
     }
+    // The AUTHENTICATED record is a separate obligation from delivering the files, and it fails
+    // separately. Files safely in Drive with no signed record is still a hole in the evidence chain,
+    // so it belongs in the same problems list the operator already reads — never a silent pass.
+    if (recorded && !recorded.ok) {
+      problems.push('Your files were delivered, but the signed submission record could not be filed: '
+        + (recorded.error || 'unknown reason') + '. Tell Damien — the files are safe, the record is missing.');
+    }
     if (problems.length) {
       const err = new Error(problems.join(' ') + ' Tap Submit again to re-send — anything already received is replaced, not duplicated.');
       err.failed = failed;
