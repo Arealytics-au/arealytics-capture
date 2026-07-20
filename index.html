@@ -285,7 +285,6 @@ function App() {
   const [progress, setProgress] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [result, setResult] = useState(null);    // { ref, mode }
-  const [setupOpen, setSetupOpen] = useState(false);
   const fileRef = useRef(null);
   const coverRef = useRef(null);   // hidden <input type=file> for the coverage screenshot
   // Damien only: a writable handle to the folder his M4E videos were dragged from (his SD card),
@@ -948,7 +947,7 @@ function App() {
   }
 
   return (
-    <Shell setupOpen={setupOpen} setSetupOpen={setSetupOpen} configured={configured} opFirst={opName ? opName.split(' ')[0] : ''}>
+    <Shell opFirst={opName ? opName.split(' ')[0] : ''}>
       {/* Single screen — the daily log. (Forms & logs moved to the field app's DOCUMENTS tab, 6 Jul 2026.) */}
 
       {/* your name */}
@@ -1658,7 +1657,7 @@ const btn = (bg) => ({ background: bg, color: '#fff', fontWeight: 700, fontSize:
   padding: '15px 22px', borderRadius: 12, letterSpacing: '0.01em' });
 
 
-function Shell({ children, setupOpen, setSetupOpen, configured, opFirst }) {
+function Shell({ children, opFirst }) {
   // Time-of-day greeting — operators mostly log in the afternoon/evening, so greet them for when they
   // actually open it. Falls back to the plain title until we know who they are.
   const hr = new Date().getHours();
@@ -1687,31 +1686,16 @@ function Shell({ children, setupOpen, setSetupOpen, configured, opFirst }) {
           {children}
         </div>
 
-        {/* footer / setup */}
-        {setSetupOpen && (
-          <div style={{ marginTop: 18, textAlign: 'center' }}>
-            <button onClick={() => setSetupOpen(!setupOpen)}
-              style={{ fontSize: 12, color: FAINT, fontFamily: '"JetBrains Mono", monospace' }}>
-              {configured ? '● hosted submissions on' : '○ admin setup'} {setupOpen ? '▴' : '▾'}
-            </button>
-            {setupOpen && (
-              <div style={{ marginTop: 12, textAlign: 'left', background: '#fff', border: `1px solid ${LINE}`,
-                borderRadius: 12, padding: '16px 18px', fontSize: 13, color: MUTED, lineHeight: 1.6 }}>
-                <b style={{ color: NAVY }}>For the manager / admin</b>
-                <p style={{ margin: '8px 0 0' }}>
-                  {configured
-                    ? 'Hosted submissions are configured — files upload to your Supabase bucket and a row is written to your submissions table. Operators just fill this form.'
-                    : 'This form runs in download‑package mode: operators get a single .zip (their files + a submission.json) to send you, which the dashboard imports.'}
-                </p>
-                <p style={{ margin: '10px 0 0' }}>
-                  To make it a true hosted link, open this file and fill the <b>CONFIG</b> block at the top
-                  (Supabase URL + anon key + a public bucket + a <code>submissions</code> table), then host the file.
-                  Step‑by‑step is in the comment above CONFIG.
-                </p>
-              </div>
-            )}
-          </div>
-        )}
+        {/* REMOVED 20 Jul 2026 — the "For the manager / admin" setup panel.
+            Two reasons, and the first is the serious one.
+            1. IT WAS WRONG. It told operators "files upload to your Supabase bucket and a row is
+               written to your submissions table". They do not. Submissions POST to the Apps Script
+               uploader and land in Google Drive under Flight Logs / Operator Uploads. The Supabase
+               branch (submitSupabase) is unreachable: the submit checks `driveOn` first and
+               DRIVE_ENDPOINT is set, so that path has never run in production.
+            2. It was setup scaffolding from the generic template this form started as — instructions
+               for configuring a backend, shown on the tool operators use every day in the field.
+            Nothing operational was removed; the panel only described configuration. */}
         <div style={{ textAlign: 'center', marginTop: 18, fontSize: 11.5, color: FAINT }}>
           Arealytics · submissions are private to your team
         </div>
