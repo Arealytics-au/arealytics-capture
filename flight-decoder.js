@@ -35,7 +35,10 @@
   }
 
   // Air 3S wide lens = fixed f/1.8; Matrice 4E aperture never opens below f/2.8.
-  const FLEET_SNS = { '1581F7FVC263U00D35JB': 'Matrice 4E' };
+  const FLEET_SNS = { '1581F7FVC263U00D35JB': 'Matrice 4E',
+    '1581FB34C25CE003223N': 'DJI Lito X1', // Lucas Moy
+    '1581FB34C25CE0031ZGB': 'DJI Lito X1', // Paul McConnell
+  };
   function detectModel(fnums, aircraftSn, rawName) {
     if (aircraftSn && FLEET_SNS[aircraftSn]) return FLEET_SNS[aircraftSn];
     const n = String(rawName || '');
