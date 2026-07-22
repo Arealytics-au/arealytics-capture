@@ -35,9 +35,17 @@
   }
 
   // Air 3S wide lens = fixed f/1.8; Matrice 4E aperture never opens below f/2.8.
-  function detectModel(fnums) {
+  const FLEET_SNS = { '1581F7FVC263U00D35JB': 'Matrice 4E' };
+  function detectModel(fnums, aircraftSn, rawName) {
+    if (aircraftSn && FLEET_SNS[aircraftSn]) return FLEET_SNS[aircraftSn];
+    const n = String(rawName || '');
+    if (/lito/i.test(n)) return 'DJI Lito X1';
+    if (/matrice\s*4/i.test(n)) return 'Matrice 4E';
+    if (/flip/i.test(n)) return 'DJI Flip';
+    if (/air\s*3s|mavic/i.test(n)) return 'Mavic Air 3S';
     const v = fnums.filter(x => typeof x === 'number' && isFinite(x) && x > 0);
     if (!v.length) return null;
+    // Air 3S f/1.8 and Lito X1 f/1.7 BOTH fall under 2.2 — aperture cannot separate them.
     return Math.min.apply(null, v) <= 2.2 ? 'Mavic Air 3S' : 'Matrice 4E';
   }
 
@@ -124,8 +132,13 @@
     if (cur.length >= 4) strings.push(cur);
     const join = strings.join(' ');
     const serialM = join.match(/\b([0-9A-Z]{10,18})\b/);
-    const modelM = join.match(/(Matrice\s*4E?|Mavic\s*Air\s*3S?)/i);
-    const model = modelM ? (/air\s*3s/i.test(modelM[1]) ? 'Mavic Air 3S' : 'Matrice 4E') : null;
+    const modelM = join.match(/(Lito\s*X1?|Matrice\s*4E?|DJI\s*Flip|Mavic\s*Air\s*3S?)/i);
+    const model = modelM
+      ? /lito/i.test(modelM[1]) ? 'DJI Lito X1'
+      : /flip/i.test(modelM[1]) ? 'DJI Flip'
+      : /air\s*3s/i.test(modelM[1]) ? 'Mavic Air 3S'
+      : 'Matrice 4E'
+      : null;
     const serial = serialM ? serialM[1] : null;
 
     if (osd.length < 10) {
