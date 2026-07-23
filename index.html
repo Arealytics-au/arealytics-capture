@@ -385,18 +385,20 @@ function App() {
   // file, stale picker handle) made every submit fail the same way with no clue why (13 Jul 2026:
   // covers 2+3 "Couldn't send" across 3 submissions while 10MB SRTs sailed through). Reading HERE
   // means an unreadable image fails LOUDLY the moment it's added, and submit never touches disk.
-  // Compressing (≤1800px JPEG) also cuts a 2–3MB phone screenshot to a few hundred KB.
+  // Compressing (≤2560px JPEG q0.92) keeps the coverage screenshots legible — map labels and
+  // property counts stay readable — while still cutting a 2–3MB phone screenshot down. Raised from
+  // 1800px/q0.85 on 23 Jul 2026 (Damien: the afternoon uploads were too low-quality to read).
   const readCover = (file) => new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => {
       try {
-        const scale = Math.min(1, 1800 / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+        const scale = Math.min(1, 2560 / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
         const w = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
         const h = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
         const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
         cv.getContext('2d').drawImage(img, 0, 0, w, h);
-        const dataUrl = cv.toDataURL('image/jpeg', 0.85);
+        const dataUrl = cv.toDataURL('image/jpeg', 0.92);
         resolve({ url, b64: dataUrl.slice(dataUrl.indexOf(',') + 1), mime: 'image/jpeg', outExt: 'jpg' });
       } catch (e) { URL.revokeObjectURL(url); reject(e); }
     };
