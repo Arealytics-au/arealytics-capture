@@ -271,6 +271,229 @@
     return blocks.length > 1 ? rawBlocksToNativeSrt(blocks) : null;
   }
 
+  /* ---- DJI Lito X1 video/proxy -> telemetry (streamed in-browser; the file itself is
+     NEVER uploaded or stored -- only the recovered telemetry text leaves this function).
+     Unlike the M4E (subtitle-text stream) the Lito X1 embeds telemetry as a Protocol
+     Buffers-encoded 'djmd' DATA track inside the MP4 container -- no public schema exists
+     for this model (confirmed 25 Jul 2026: ExifTool 13.58 recognises the protocol name
+     "dvtm_Lito_X1.proto" but returns "Unknown protocol ... please submit sample for
+     testing"). The field mapping below was reverse-engineered and VALIDATED against a
+     real sample (Lucas Moy's airframe, 24 Jul 2026): decoded GPS position and relative
+     altitude matched that same flight's TXT flight record exactly. See
+     decrypt/lito_extract.py for the from-scratch server-side twin of this same logic
+     and the full validation writeup -- this is a deliberate JS port of already-proven code,
+     not a fresh guess. Prefer the .LRF over the .MP4: same telemetry (djmd track is
+     identical either way), 1/8th the size, so it's what's actually safe to read in a tab. */
+
+  // -- minimal ISO-BMFF (MP4/MOV) box walker: just enough to find the djmd track's
+  //    sample table and slice its raw sample bytes out of the file, in-browser. --
+  function readBoxes(dv, start, end) {
+    const boxes = [];
+    let o = start;
+    while (o + 8 <= end) {
+      let size = dv.getUint32(o), type = String.fromCharCode(dv.getUint8(o + 4), dv.getUint8(o + 5), dv.getUint8(o + 6), dv.getUint8(o + 7));
+      let headerLen = 8;
+      if (size === 1) { // 64-bit largesize
+        const hi = dv.getUint32(o + 8), lo = dv.getUint32(o + 12);
+        size = hi * 4294967296 + lo; headerLen = 16;
+      } else if (size === 0) {
+        size = end - o; // box extends to end of its parent
+      }
+      if (size < headerLen || o + size > end) break; // malformed / truncated -- stop, don't throw
+      boxes.push({ type, start: o, headerLen, bodyStart: o + headerLen, end: o + size });
+      o += size;
+    }
+    return boxes;
+  }
+  function findBox(boxes, type) { return boxes.find(b => b.type === type); }
+
+  function findDjmdTrack(fullDv, fileSize) {
+    // moov can sit anywhere in the file; scan top-level boxes to find it (mdat is usually
+    // much bigger, so read top-level box headers first rather than assuming an offset).
+    const top = readBoxes(fullDv, 0, fileSize);
+    const moov = findBox(top, 'moov');
+    if (!moov) return null;
+    const moovKids = readBoxes(fullDv, moov.bodyStart, moov.end);
+    for (const trak of moovKids.filter(b => b.type === 'trak')) {
+      const trakKids = readBoxes(fullDv, trak.bodyStart, trak.end);
+      const mdia = findBox(trakKids, 'mdia'); if (!mdia) continue;
+      const mdiaKids = readBoxes(fullDv, mdia.bodyStart, mdia.end);
+      const minf = findBox(mdiaKids, 'minf'); if (!minf) continue;
+      const minfKids = readBoxes(fullDv, minf.bodyStart, minf.end);
+      const stbl = findBox(minfKids, 'stbl'); if (!stbl) continue;
+      const stblKids = readBoxes(fullDv, stbl.bodyStart, stbl.end);
+      const stsd = findBox(stblKids, 'stsd'); if (!stsd) continue;
+      // stsd: version/flags(4) + entry_count(4) + first entry starts with size(4)+fourCC(4)
+      const entryFourCC = String.fromCharCode(
+        fullDv.getUint8(stsd.bodyStart + 12), fullDv.getUint8(stsd.bodyStart + 13),
+        fullDv.getUint8(stsd.bodyStart + 14), fullDv.getUint8(stsd.bodyStart + 15));
+      if (entryFourCC !== 'djmd') continue;
+      const stsz = findBox(stblKids, 'stsz'), stsc = findBox(stblKids, 'stsc');
+      const stco = findBox(stblKids, 'stco') || findBox(stblKids, 'co64');
+      if (!stsz || !stsc || !stco) continue;
+      return { dv: fullDv, stsz, stsc, stco, isCo64: stco.type === 'co64' };
+    }
+    return null;
+  }
+
+  function sampleByteRanges({ dv, stsz, stsc, stco, isCo64 }) {
+    // stsz: ver/flags(4) sampleSize(4) sampleCount(4) [ sizes(4 each) if sampleSize==0 ]
+    const uniformSize = dv.getUint32(stsz.bodyStart + 4);
+    const sampleCount = dv.getUint32(stsz.bodyStart + 8);
+    const sizes = new Array(sampleCount);
+    if (uniformSize !== 0) {
+      sizes.fill(uniformSize);
+    } else {
+      for (let i = 0; i < sampleCount; i++) sizes[i] = dv.getUint32(stsz.bodyStart + 12 + i * 4);
+    }
+    // stco/co64: ver/flags(4) entryCount(4) offsets(4 or 8 each)
+    const chunkCount = dv.getUint32(stco.bodyStart + 4);
+    const chunkOffsets = new Array(chunkCount);
+    for (let i = 0; i < chunkCount; i++) {
+      chunkOffsets[i] = isCo64
+        ? dv.getUint32(stco.bodyStart + 8 + i * 8) * 4294967296 + dv.getUint32(stco.bodyStart + 12 + i * 8)
+        : dv.getUint32(stco.bodyStart + 8 + i * 4);
+    }
+    // stsc: ver/flags(4) entryCount(4) [firstChunk(4) samplesPerChunk(4) sampleDescIdx(4)]*
+    const stscCount = dv.getUint32(stsc.bodyStart + 4);
+    const stscEntries = [];
+    for (let i = 0; i < stscCount; i++) {
+      const o = stsc.bodyStart + 8 + i * 12;
+      stscEntries.push({ firstChunk: dv.getUint32(o), samplesPerChunk: dv.getUint32(o + 4) });
+    }
+    // Standard MP4 sample-to-chunk expansion: each entry's samplesPerChunk applies to every
+    // chunk from its firstChunk up to (not including) the next entry's firstChunk.
+    const ranges = []; let sampleIdx = 0;
+    for (let e = 0; e < stscEntries.length; e++) {
+      const first = stscEntries[e].firstChunk;
+      const last = e + 1 < stscEntries.length ? stscEntries[e + 1].firstChunk - 1 : chunkCount;
+      for (let chunk = first; chunk <= last && chunk <= chunkCount; chunk++) {
+        let offset = chunkOffsets[chunk - 1];
+        for (let s = 0; s < stscEntries[e].samplesPerChunk; s++) {
+          if (sampleIdx >= sampleCount) break;
+          ranges.push({ offset, size: sizes[sampleIdx] });
+          offset += sizes[sampleIdx];
+          sampleIdx++;
+        }
+      }
+    }
+    return ranges;
+  }
+
+  // -- schema-free protobuf decode: tag = (fieldNum<<3)|wireType. Recurses into
+  //    length-delimited fields that themselves look like valid protobuf. JS port of
+  //    decrypt/lito_extract.py's _decode_message -- keep the two in sync. --
+  function pbReadVarint(u8, i) {
+    let result = 0n, shift = 0n;
+    while (true) {
+      const b = u8[i]; i++;
+      result |= BigInt(b & 0x7f) << shift;
+      if (!(b & 0x80)) return [result, i];
+      shift += 7n;
+    }
+  }
+  function pbDecodeMessage(u8, dv, base) {
+    const out = {}; let i = 0; const n = u8.length;
+    if (n === 0) return out;
+    while (i < n) {
+      let tag, ni; try { [tag, ni] = pbReadVarint(u8, i); } catch (e) { return null; }
+      i = ni; const tagN = Number(tag);
+      const fieldNum = tagN >>> 3, wireType = tagN & 0x7;
+      if (fieldNum === 0) return null;
+      if (wireType === 0) {
+        let val; try { [val, i] = pbReadVarint(u8, i); } catch (e) { return null; }
+        out[fieldNum] = val; // BigInt -- caller converts as needed
+      } else if (wireType === 1) {
+        if (i + 8 > n) return null;
+        out[fieldNum] = dv.getFloat64(base + i, true); i += 8;
+      } else if (wireType === 5) {
+        if (i + 4 > n) return null;
+        out[fieldNum] = dv.getFloat32(base + i, true); i += 4;
+      } else if (wireType === 2) {
+        let len; try { [len, i] = pbReadVarint(u8, i); } catch (e) { return null; }
+        len = Number(len);
+        if (i + len > n) return null;
+        const chunk = u8.subarray(i, i + len); i += len;
+        const nested = pbDecodeMessage(chunk, dv, base + (i - len));
+        out[fieldNum] = (nested && Object.keys(nested).length) ? nested : chunk;
+      } else {
+        return null;
+      }
+    }
+    return out;
+  }
+  function pbGet(d, ...path) {
+    let cur = d;
+    for (const p of path) { if (!cur || typeof cur !== 'object' || !(p in cur)) return null; cur = cur[p]; }
+    return cur;
+  }
+  function pbInt64s(v) { // reinterpret a plain-varint BigInt as signed 64-bit
+    if (v == null) return null;
+    v = BigInt.asIntN(64, v);
+    return Number(v);
+  }
+
+  // Field paths validated against a real sample's TXT flight record (see docstring above):
+  //   3.1.2 = TimeStamp (us)   3.3.4.1.2/.3 = GPS lat/lon (already degrees)
+  //   3.3.4.2 = AbsoluteAltitude (int64s, /1000 -> m)   3.3.5.1 = RelativeAltitude (/1000 -> m)
+  function decodeLitoFrame(bytes) {
+    const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const msg = pbDecodeMessage(bytes, dv, 0);
+    if (!msg) return null;
+    const lat = pbGet(msg, 3, 3, 4, 1, 2), lon = pbGet(msg, 3, 3, 4, 1, 3);
+    if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+    const absAltRaw = pbGet(msg, 3, 3, 4, 2);
+    const relAltRaw = pbGet(msg, 3, 3, 5, 1);
+    return {
+      lat, lon,
+      absAlt: absAltRaw != null ? pbInt64s(absAltRaw) / 1000 : null,
+      relAlt: typeof relAltRaw === 'number' ? relAltRaw / 1000 : null,
+    };
+  }
+
+  async function extractLitoSrt(file, onProgress) {
+    // Read once (LRF-sized files only, <~30MB -- see the .mp4/.mov size gate in decode())
+    // and reuse the same buffer for both box-walking and sample extraction.
+    const buf = await file.arrayBuffer();
+    const dv = new DataView(buf);
+    const u8all = new Uint8Array(buf);
+    const track = findDjmdTrack(dv, buf.byteLength);
+    if (!track) return null;
+    const ranges = sampleByteRanges(track);
+    if (ranges.length < 2) return null;
+    const startMs = (() => {
+      const m = (file.name || '').match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
+      if (!m) return Date.now();
+      return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
+    })();
+    const frames = [];
+    for (let i = 0; i < ranges.length; i++) {
+      const r = ranges[i];
+      const f = decodeLitoFrame(u8all.subarray(r.offset, r.offset + r.size));
+      frames.push(f);
+      if (onProgress && (i % 50 === 0)) { onProgress(Math.round(i / ranges.length * 100)); await new Promise(res => setTimeout(res, 0)); }
+    }
+    // ~30 fps for the LRF track (confirmed on the validation sample) -- used only to space
+    // frame timestamps; GPS/altitude values themselves came straight from the track.
+    const dtMs = 1000 / 30;
+    const pad = (n, w) => String(n).padStart(w, '0');
+    const tc = (ms) => { const s = Math.max(0, ms / 1000); return `${pad(Math.floor(s / 3600), 2)}:${pad(Math.floor(s % 3600 / 60), 2)}:${pad(Math.floor(s % 60), 2)},${pad(Math.round((s - Math.floor(s)) * 1000), 3)}`; };
+    let out = '', wrote = 0;
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i]; if (!f) continue;
+      const t = i * dtMs, nt = (i + 1 < frames.length ? (i + 1) : i + 1) * dtMs;
+      const when = new Date(startMs + t);
+      const z = (x) => String(x).padStart(2, '0');
+      const stamp = `${when.getFullYear()}-${z(when.getMonth() + 1)}-${z(when.getDate())} ${z(when.getHours())}:${z(when.getMinutes())}:${z(when.getSeconds())}.${String(when.getMilliseconds()).padStart(3, '0')}`;
+      const rel = f.relAlt != null ? f.relAlt : 0, abs = f.absAlt != null ? f.absAlt : 0;
+      wrote++;
+      out += `${wrote}\n${tc(t)} --> ${tc(nt)}\n<font size="28">FrameCnt: ${wrote}, DiffTime: 33ms\n${stamp}\n`
+        + `[iso: 100] [shutter: 1/1000.0] [fnum: 2.8] [ev: 0] [color_md: default] [focal_len: 24.00] `
+        + `[latitude: ${f.lat.toFixed(6)}] [longitude: ${f.lon.toFixed(6)}] [rel_alt: ${rel.toFixed(3)} abs_alt: ${abs.toFixed(3)}] </font>\n\n`;
+    }
+    return wrote >= 2 ? out : null;
+  }
+
   async function decode(file, onProgress) {
     const lower = (file.name || '').toLowerCase();
     try {
@@ -288,9 +511,24 @@
         }
         return decodeSRT(text, file.name);
       }
+      if (lower.endsWith('.lrf')) {
+        // Lito X1 proxy video: same 'djmd' telemetry track as the main .MP4, ~1/8th the
+        // size \u2014 this is the file that's actually safe to fully buffer in a tab. The main
+        // .MP4 is NOT handled here on purpose (100+ MB, would need the M4E's chunked-scan
+        // treatment to be tab-safe, and the LRF already gives identical GPS/altitude).
+        const srt = await extractLitoSrt(file, onProgress);
+        if (!srt) return { ok: false, kind: 'LITO', name: file.name, error: 'No embedded telemetry found in this .LRF' };
+        const res = decodeSRT(srt, file.name);
+        if (!res.ok) return Object.assign(res, { kind: 'LITO' });
+        return Object.assign(res, { kind: 'LITO', model: 'DJI Lito X1', extractedSrt: srt });
+      }
       if (lower.endsWith('.mp4') || lower.endsWith('.mov')) {
         const srt = await extractM4eSrt(file, onProgress);
-        if (!srt) return { ok: false, kind: 'M4E', name: file.name, error: 'No embedded telemetry in this video \u2014 only Matrice 4E videos carry it' };
+        if (!srt) {
+          return { ok: false, kind: 'M4E', name: file.name,
+            error: 'No embedded telemetry in this video \u2014 Matrice 4E videos carry it, but a '
+              + 'Lito X1 video does not (drop its .LRF instead, not the .MP4)' };
+        }
         const res = decodeSRT(srt, file.name);
         if (!res.ok) return Object.assign(res, { kind: 'M4E' });
         // Only the M4E embeds telemetry in video, so the model is known (fnum-based

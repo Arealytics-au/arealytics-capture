@@ -99,10 +99,14 @@ const fmtBytes = (n) => n < 1024 ? n + ' B'
   : n < 1048576 ? (n / 1024).toFixed(0) + ' KB'
   : (n / 1048576).toFixed(1) + ' MB';
 
-// SRT & TXT logs only for the crew — MP4/video goes through the VST tool. EXCEPTION: Damien's Matrice 4E
-// embeds telemetry in the MP4, so HIS uploads also accept video (allowVideo) — the SRT is extracted
-// in-browser, only that text uploads (never the video), and it's written back to the folder it came from.
-const okFile = (name, allowVideo) => allowVideo ? /\.(srt|txt|mp4|mov)$/i.test(name) : /\.(srt|txt)$/i.test(name);
+// SRT & TXT logs only for the crew by default — MP4/video goes through the VST tool. Two
+// exceptions, both because the drone embeds telemetry INSIDE the video instead of writing a
+// plain sidecar: Matrice 4E (Damien only) accepts .mp4/.mov — sniffed in-browser, video never
+// uploads, written back to the source folder. Lito X1 (whole core crew) accepts .lrf — same
+// telemetry as its .mp4, ~1/8th the size, so it's what's actually safe to read in a tab; the
+// .mp4 itself is deliberately NOT accepted here (see flight-decoder.js's own size reasoning).
+const FILE_ACCEPT = { air3s: /\.(srt|txt)$/i, lito: /\.(srt|txt|lrf)$/i, m4e: /\.(srt|txt|mp4|mov)$/i };
+const okFile = (name, droneType) => (FILE_ACCEPT[droneType] || FILE_ACCEPT.air3s).test(name);
 const fkey = (f) => f.name + '|' + f.size;
 const todayISO = () => { const d = new Date(); const z = (x) => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`; };
@@ -260,6 +264,10 @@ function App() {
   // The day-type is the ONE required choice each day — it maps 1:1 to the reporting categories
   // (flew / weather-or-blocked / day off / RePL study). Replaces the old flew yes/no.
   const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'off' | 'repl' | 'extract'
+  // Which drone was flown TODAY — every core pilot now carries both an Air 3S and a Lito X1
+  // (Damien also has the Matrice 4E), and each drone hands over telemetry differently, so the
+  // file picker's accepted types + on-screen instructions key off this (25 Jul 2026).
+  const [droneType, setDroneType] = useState('air3s'); // 'air3s' | 'lito' | 'm4e'
   const [reason, setReason] = useState('');       // weather / blocker reason (when nofly)
   const [reasonOther, setReasonOther] = useState('');
   const [covers, setCovers] = useState([]);       // [{ file, url, suburb, postcode, state }] — each marked screenshot carries its OWN tied location (pilots fly MULTIPLE areas)
@@ -341,7 +349,7 @@ function App() {
     // submitDrive iterates a SNAPSHOT of `files` — anything added mid-upload would show in the list
     // but silently never send. Freeze the list while submitting.
     if (status === 'submitting') return;
-    const incoming = Array.from(list || []).filter(f => okFile(f.name, isDamien));
+    const incoming = Array.from(list || []).filter(f => okFile(f.name, droneType));
     const seen = new Set(files.map(f => fkey(f)));
     const fresh = incoming.filter(f => !seen.has(fkey(f)));
     if (!fresh.length) return;
@@ -478,7 +486,7 @@ function App() {
   // can be written straight back into it (Chromium File System Access).
   const addFilesFromDir = async (dir) => {
     const out = [];
-    try { for await (const e of dir.values()) { if (e.kind === 'file' && okFile(e.name, true)) out.push(await e.getFile()); } }   // folder-drop is Damien-only → videos allowed
+    try { for await (const e of dir.values()) { if (e.kind === 'file' && okFile(e.name, 'm4e')) out.push(await e.getFile()); } }   // folder-drop is Damien's M4E card workflow only → videos allowed
     catch (_) {}
     if (out.length) addFiles(out);
   };
@@ -1043,6 +1051,18 @@ function App() {
         {/* day-type branch */}
         {didFly ? (
           <div>
+            {/* Which drone — decides what the file picker accepts below AND which instructions
+                show, since each drone hands over telemetry a different way (25 Jul 2026). */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={formStyles.label}>Which drone did you fly today?</label>
+              <select className="ar-field" style={formStyles.field} value={droneType}
+                onChange={(e) => setDroneType(e.target.value)}>
+                <option value="air3s">DJI Air 3S</option>
+                <option value="lito">DJI Lito X1</option>
+                {isDamien && <option value="m4e">DJI Matrice 4E</option>}
+              </select>
+            </div>
+
             <FieldLabel done={filesDone}>Today’s flight files</FieldLabel>
             <div onClick={() => fileRef.current && fileRef.current.click()}
               onDragOver={(e) => { e.preventDefault(); setDrag(true); }}
@@ -1050,9 +1070,9 @@ function App() {
               onDrop={(e) => {
                 e.preventDefault(); setDrag(false);
                 const dt = e.dataTransfer, dropped = dt.files;   // capture now — DataTransfer is cleared after this handler
-                // Damien only: if a FOLDER is dropped, keep its handle so the extracted SRTs go
+                // M4E only: if a FOLDER is dropped, keep its handle so the extracted SRTs go
                 // straight back into it (exactly where the videos came from). Chromium only.
-                if (isDamien && dt.items && dt.items.length && dt.items[0].getAsFileSystemHandle) {
+                if (droneType === 'm4e' && dt.items && dt.items.length && dt.items[0].getAsFileSystemHandle) {
                   Promise.all(Array.from(dt.items).map(it => it.getAsFileSystemHandle ? it.getAsFileSystemHandle() : null).filter(Boolean))
                     .then(hs => { const d = hs.find(h => h && h.kind === 'directory'); if (d) { srtDirRef.current = d; addFilesFromDir(d); } else addFiles(dropped); })
                     .catch(() => addFiles(dropped));
@@ -1061,17 +1081,27 @@ function App() {
               style={{ border: `1.5px dashed ${drag ? NAVY : '#C7CCD9'}`, borderRadius: 13,
                 background: drag ? 'rgba(10,31,92,0.04)' : '#fff', padding: '22px 18px', cursor: 'pointer',
                 textAlign: 'center', transition: 'all .15s' }}>
-              <input ref={fileRef} type="file" multiple accept={isDamien ? '.srt,.txt,.mp4,.mov' : '.srt,.txt'} hidden
-                onChange={(e) => addFiles(e.target.files)} />
+              <input ref={fileRef} type="file" multiple
+                accept={droneType === 'm4e' ? '.srt,.txt,.mp4,.mov' : droneType === 'lito' ? '.srt,.txt,.lrf' : '.srt,.txt'}
+                hidden onChange={(e) => addFiles(e.target.files)} />
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={NAVY} strokeWidth="1.7"
                 style={{ marginBottom: 6 }}><path d="M12 16V4M12 4 L7 9M12 4 L17 9" strokeLinecap="round" strokeLinejoin="round"/>
                 <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" strokeLinecap="round"/></svg>
-              <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>Drop your <b>.SRT</b> & <b>.TXT</b> flight logs</div>
+              <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>
+                {droneType === 'lito'
+                  ? <>Drop your <b>.LRF</b> & <b>.TXT</b> flight logs</>
+                  : <>Drop your <b>.SRT</b> & <b>.TXT</b> flight logs</>}
+              </div>
               <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>or tap to browse — add every flight from today.</div>
             </div>
-            {isDamien && (
+            {droneType === 'm4e' && (
               <div style={{ marginTop: 8, fontSize: 12.5, color: NAVY, background: '#EEF2FB', border: `1px solid ${LINE}`, borderRadius: 10, padding: '9px 12px', lineHeight: 1.5 }}>
                 <b>Matrice 4E:</b> drop the whole <b>card folder</b> (with the .MP4s) — the SRT is sniffed out of each video in place (the video never uploads) and written <b>straight back into that folder</b> after you submit, so VST has the MP4 + SRT together. In the embedded app it downloads a .zip instead — open in a browser tab for the direct card write.
+              </div>
+            )}
+            {droneType === 'lito' && (
+              <div style={{ marginTop: 8, fontSize: 12.5, color: NAVY, background: '#EEF2FB', border: `1px solid ${LINE}`, borderRadius: 10, padding: '9px 12px', lineHeight: 1.5 }}>
+                <b>Lito X1:</b> drop the <b>.LRF</b> (the small proxy clip), not the .MP4 — it carries the exact same GPS/altitude telemetry at a fraction of the size, so it's what actually reads in a browser tab. The telemetry is sniffed out in place; <b>no video ever uploads</b>. Add your <b>.TXT</b> flight log alongside it.
               </div>
             )}
             {files.length > 0 && (
