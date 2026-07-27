@@ -610,9 +610,9 @@ function App() {
       else await submitBundle(meta);
       setResult({ ref, mode: driveOn ? 'drive' : 'bundle', recorded: driveRecorded });
       setStatus('done');
-      // Damien: if he dropped the card's folder, write the SRTs straight back into it now —
+      // If a card folder was dropped this session, write the SRTs straight back into it now —
       // we already hold a writable handle, so no extra prompt. (File-drops use the button instead.)
-      if (isDamien && srtDirRef.current && extractedSrts().length) saveSrtsToCard();
+      if (srtDirRef.current && extractedSrts().length) saveSrtsToCard();
     } catch (e) {
       const m = String(e && e.message ? e.message : e);
       // A bare TypeError("Failed to fetch") means the service was unreachable — say that in
@@ -960,9 +960,10 @@ function App() {
               Saved to your <b>Arealytics Drive folder</b> — it syncs to the dashboard automatically.
             </p>
           )}
-          {/* Damien only: keep a local SRT copy on the source card. Auto-done if he dropped the
-              folder; otherwise one tap to point at the card. Invisible to every other operator. */}
-          {isDamien && extractedSrts().length > 0 && (
+          {/* Any operator whose files had telemetry sniffed in-browser (M4E video or Lito .LRF) can
+              keep a local SRT copy on the source card. Auto-done if they dropped the folder;
+              otherwise one tap to point at the card, or download in the embedded form. */}
+          {extractedSrts().length > 0 && (
             <div style={{ marginTop: 16 }}>
               {srtSaved
                 ? <p style={{ margin: 0, fontSize: 13.5, color: srtSaved[0] === '✓' ? '#0B8B43' : ORANGE }}>{srtSaved}</p>
