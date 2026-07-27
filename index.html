@@ -374,7 +374,7 @@ function App() {
     // Text files decode in parallel (cheap), but VIDEOS go one at a time: each M4E extraction holds
     // tens of MB of chunk buffers + regex state — a 10-video drop decoded concurrently is ~500MB of
     // churn and kills the tab on a field phone.
-    const isVid = (f) => /\.(mp4|mov)$/i.test(f.name);
+    const isVid = (f) => /\.(mp4|mov|lrf)$/i.test(f.name);
     fresh.filter(f => !isVid(f)).forEach(decodeOne);
     (async () => { for (const f of fresh.filter(isVid)) await decodeOne(f); })();
   };
@@ -493,7 +493,7 @@ function App() {
   // The SRTs we extracted in-browser from this submission's M4E videos.
   const extractedSrts = () => files.map(f => {
     const d = decoded[fkey(f)] || {};
-    return d.extractedSrt ? { name: f.name.replace(/\.(mp4|mov)$/i, '.srt'), text: d.extractedSrt } : null;
+    return d.extractedSrt ? { name: f.name.replace(/\.(mp4|mov|lrf)$/i, '.srt'), text: d.extractedSrt } : null;
   }).filter(Boolean);
   // Download the extracted SRTs — the fallback when the card can't be written directly (embedded frame or
   // no File System Access API). Firing one download per file makes the browser throttle/silently DROP part
@@ -777,7 +777,7 @@ function App() {
       for (let i = 0; i < files.length; i++) {
         const f = files[i];
         const dec = decoded[fkey(f)] || {};
-        const upName = dec.extractedSrt ? f.name.replace(/\.(mp4|mov)$/i, '.srt') : f.name;
+        const upName = dec.extractedSrt ? f.name.replace(/\.(mp4|mov|lrf)$/i, '.srt') : f.name;
         // Apps Script POSTs cap out around 50MB and base64 inflates ×1.37 — a raw file >35MB can
         // never succeed, so fail it fast WITH the reason instead of burning 3 blind retries.
         if (!dec.extractedSrt && f.size > 35 * 1024 * 1024) {
@@ -788,7 +788,7 @@ function App() {
         try {
           // HARD GUARD: a video without extracted telemetry must NEVER reach the raw-upload path —
           // base64-ing a multi-GB .MP4 kills the tab, and the video must never leave the machine.
-          if (/\.(mp4|mov)$/i.test(f.name) && !dec.extractedSrt) throw new Error('video has no extracted telemetry');
+          if (/\.(mp4|mov|lrf)$/i.test(f.name) && !dec.extractedSrt) throw new Error('video has no extracted telemetry');
           if (dec.extractedSrt) {
             // M4E video: telemetry was extracted in-browser — upload ONLY that (a few MB).
             // The multi-GB video never leaves this machine.
@@ -908,8 +908,8 @@ function App() {
     const folder = zip.folder('flight-files');
     if (meta.flew) for (const f of files) {
       const dec = decoded[fkey(f)] || {};
-      if (dec.extractedSrt) folder.file(f.name.replace(/\.(mp4|mov)$/i, '.srt'), dec.extractedSrt);
-      else if (!/\.(mp4|mov)$/i.test(f.name)) folder.file(f.name, f);
+      if (dec.extractedSrt) folder.file(f.name.replace(/\.(mp4|mov|lrf)$/i, '.srt'), dec.extractedSrt);
+      else if (!/\.(mp4|mov|lrf)$/i.test(f.name)) folder.file(f.name, f);
     }
     // decoded CSVs alongside the raw files
     const csvFolder = zip.folder('decoded-csv');
