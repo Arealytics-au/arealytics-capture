@@ -488,7 +488,10 @@
       const rel = f.relAlt != null ? f.relAlt : 0, abs = f.absAlt != null ? f.absAlt : 0;
       wrote++;
       out += `${wrote}\n${tc(t)} --> ${tc(nt)}\n<font size="28">FrameCnt: ${wrote}, DiffTime: 33ms\n${stamp}\n`
-        + `[iso: 100] [shutter: 1/1000.0] [fnum: 2.8] [ev: 0] [color_md: default] [focal_len: 24.00] `
+        // fnum 1.7 = the Lito X1's REAL fixed aperture — and load-bearing: the dashboard bake's
+        // model heuristic reads "wide lens at f>=2.5" as a Matrice 4E, so the old 2.8 placeholder
+        // mislabelled Lito flights as M4E and misattributed them (21 double-counted, 28 Jul 2026).
+        + `[iso: 100] [shutter: 1/1000.0] [fnum: 1.7] [ev: 0] [color_md: default] [focal_len: 24.00] `
         + `[latitude: ${f.lat.toFixed(6)}] [longitude: ${f.lon.toFixed(6)}] [rel_alt: ${rel.toFixed(3)} abs_alt: ${abs.toFixed(3)}] </font>\n\n`;
     }
     return wrote >= 2 ? out : null;
