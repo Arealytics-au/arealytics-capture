@@ -515,8 +515,12 @@
         return decodeSRT(text, file.name);
       }
       if (lower.endsWith('.lrf')) {
-        // Lito X1 proxy video: same 'djmd' telemetry track as the main .MP4, ~1/8th the
-        // size \u2014 this is the file that's actually safe to fully buffer in a tab. The main
+        // FALLBACK ONLY since 28 Jul 2026. The crew switched SRT-alongside-video ON at the
+        // controller, so the Lito now writes a plain .SRT next to the .MP4 and the form no longer
+        // asks for the .LRF. This path stays because cards recorded before the switch still exist
+        // and a controller can lose the setting \u2014 removing it would turn a recoverable flight
+        // into a lost one. Lito X1 proxy video: same 'djmd' telemetry track as the main .MP4,
+        // ~1/8th the size \u2014 the file that's actually safe to fully buffer in a tab. The main
         // .MP4 is NOT handled here on purpose (100+ MB, would need the M4E's chunked-scan
         // treatment to be tab-safe, and the LRF already gives identical GPS/altitude).
         const srt = await extractLitoSrt(file, onProgress);
@@ -530,7 +534,7 @@
         if (!srt) {
           return { ok: false, kind: 'M4E', name: file.name,
             error: 'No embedded telemetry in this video \u2014 Matrice 4E videos carry it, but a '
-              + 'Lito X1 video does not (drop its .LRF instead, not the .MP4)' };
+              + 'Lito X1 video does not. The Lito now writes a .SRT next to the .MP4: drop that.' };
         }
         const res = decodeSRT(srt, file.name);
         if (!res.ok) return Object.assign(res, { kind: 'M4E' });

@@ -102,9 +102,12 @@ const fmtBytes = (n) => n < 1024 ? n + ' B'
 // SRT & TXT logs only for the crew by default — MP4/video goes through the VST tool. Two
 // exceptions, both because the drone embeds telemetry INSIDE the video instead of writing a
 // plain sidecar: Matrice 4E (Damien only) accepts .mp4/.mov — sniffed in-browser, video never
-// uploads, written back to the source folder. Lito X1 (whole core crew) accepts .lrf — same
-// telemetry as its .mp4, ~1/8th the size, so it's what's actually safe to read in a tab; the
-// .mp4 itself is deliberately NOT accepted here (see flight-decoder.js's own size reasoning).
+// uploads, written back to the source folder. Lito X1 was the second exception until 28 Jul 2026,
+// when the crew switched SRT-alongside-video ON at the controller: it now writes a plain .SRT next
+// to the .MP4, so its upload is IDENTICAL to the Air 3S and the form says nothing special about it.
+// .lrf stays in the accept pattern purely as a silent fallback (a card recorded before the switch,
+// or a controller that lost the setting); the .mp4 is still deliberately NOT accepted for the Lito
+// (100+ MB, would need the M4E's chunked-scan treatment — see flight-decoder.js's size reasoning).
 const FILE_ACCEPT = { air3s: /\.(srt|txt)$/i, lito: /\.(srt|txt|lrf)$/i, m4e: /\.(srt|txt|mp4|mov)$/i };
 const okFile = (name, droneType) => (FILE_ACCEPT[droneType] || FILE_ACCEPT.air3s).test(name);
 const fkey = (f) => f.name + '|' + f.size;
@@ -1089,9 +1092,7 @@ function App() {
                 style={{ marginBottom: 6 }}><path d="M12 16V4M12 4 L7 9M12 4 L17 9" strokeLinecap="round" strokeLinejoin="round"/>
                 <path d="M4 15v3a2 2 0 002 2h12a2 2 0 002-2v-3" strokeLinecap="round"/></svg>
               <div style={{ fontWeight: 700, color: INK, fontSize: 15 }}>
-                {droneType === 'lito'
-                  ? <>Drop your <b>.LRF</b> & <b>.TXT</b> flight logs</>
-                  : <>Drop your <b>.SRT</b> & <b>.TXT</b> flight logs</>}
+                Drop your <b>.SRT</b> & <b>.TXT</b> flight logs
               </div>
               <div style={{ fontSize: 13, color: FAINT, marginTop: 3 }}>or tap to browse — add every flight from today.</div>
             </div>
@@ -1100,11 +1101,12 @@ function App() {
                 <b>Matrice 4E:</b> drop the whole <b>card folder</b> (with the .MP4s) — the SRT is sniffed out of each video in place (the video never uploads) and written <b>straight back into that folder</b> after you submit, so VST has the MP4 + SRT together. In the embedded app it downloads a .zip instead — open in a browser tab for the direct card write.
               </div>
             )}
-            {droneType === 'lito' && (
-              <div style={{ marginTop: 8, fontSize: 12.5, color: NAVY, background: '#EEF2FB', border: `1px solid ${LINE}`, borderRadius: 10, padding: '9px 12px', lineHeight: 1.5 }}>
-                <b>Lito X1:</b> drop the <b>.LRF</b> (the small proxy clip), not the .MP4 — it carries the exact same GPS/altitude telemetry at a fraction of the size, so it's what actually reads in a browser tab. The telemetry is sniffed out in place; <b>no video ever uploads</b>. Add your <b>.TXT</b> flight log alongside it.
-              </div>
-            )}
+            {/* 28 Jul 2026: the Lito X1 note is GONE. The controllers now have SRT-alongside-video
+                switched on, so the Lito writes a .SRT next to the .MP4 like every other airframe and
+                the upload is identical to the Air 3S — .SRT + .TXT. There is nothing Lito-specific
+                left to say, so nothing is said. (.lrf is still ACCEPTED by the picker and still
+                decodes, as a silent fallback for a card recorded before the switch was flipped, or a
+                controller that lost the setting. It is simply no longer instructed.) */}
             {files.length > 0 && (
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 7 }}>
                 {files.map((f, i) => {
