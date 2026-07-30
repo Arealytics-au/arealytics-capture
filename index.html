@@ -267,6 +267,13 @@ function App() {
   // The day-type is the ONE required choice each day — it maps 1:1 to the reporting categories
   // (flew / weather-or-blocked / day off / RePL study). Replaces the old flew yes/no.
   const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'off' | 'repl' | 'extract'
+  // SPLIT DAY (30 Jul 2026, pilots' request via Damien). A day is often two different days: drive
+  // out, fly the morning, weather shuts it down after lunch. Reporting that whole day as "Flew"
+  // hides the lost half; reporting it as "Couldn't fly" throws away real captured work. So the
+  // day can be halved. `dayType` stays the AM value and the whole-day value when not split, which
+  // is what keeps every existing manifest, the ingest and the board numbers working unchanged.
+  const [splitDay, setSplitDay] = useState(false);
+  const [dayTypePm, setDayTypePm] = useState('nofly');
   // Which drone was flown TODAY — every core pilot now carries both an Air 3S and a Lito X1
   // (Damien also has the Matrice 4E), and each drone hands over telemetry differently, so the
   // file picker's accepted types + on-screen instructions key off this (25 Jul 2026).
@@ -341,12 +348,15 @@ function App() {
   const decStates = files.map(f => decoded[fkey(f)] || { status: 'decoding' });
   const anyDecoding = decStates.some(d => d.status === 'decoding');
   const anyError = decStates.some(d => d.status === 'error');
-  const didFly = dayType === 'flew';
+  // Flew if EITHER half flew — the upload/coverage section must appear for a half-day of flying.
+  const didFly = dayType === 'flew' || (splitDay && dayTypePm === 'flew');
   const nameDone = !!opName;
   const dateDone = !!date;
   const filesDone = didFly && files.length > 0 && !anyDecoding && !anyError
     && decStates.every(d => d.status === 'ok' || d.status === 'encrypted');
-  const reasonDone = dayType === 'nofly' && !!reason && (reason !== 'Other' || !!reasonOther.trim());
+  // A no-fly in EITHER half needs a reason — otherwise a PM washout submits with no cause recorded.
+  const anyNoFly = dayType === 'nofly' || (splitDay && dayTypePm === 'nofly');
+  const reasonDone = anyNoFly && !!reason && (reason !== 'Other' || !!reasonOther.trim());
 
   const addFiles = (list) => {
     // submitDrive iterates a SNAPSHOT of `files` — anything added mid-upload would show in the list
@@ -569,8 +579,9 @@ function App() {
     else if (covers.some(c => !(c.suburb && c.suburb.trim()) || !/^\d{4}$/.test((c.postcode || '').trim())))
       errors.push('Add the suburb and postcode next to each coverage screenshot.');
   }
-  if (dayType === 'nofly' && !reason) errors.push('Pick why you couldn\u2019t fly.');
-  if (dayType === 'nofly' && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
+  if (anyNoFly && !reason) errors.push('Pick why you couldn\u2019t fly.');
+  if (anyNoFly && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
+  if (splitDay && dayType === dayTypePm) errors.push('AM and PM are the same \u2014 untick the split, or pick two different halves.');
   const reasonFinal = reason === 'Other' ? (reasonOther.trim() || 'Other') : reason;
   const canSubmit = errors.length === 0 && status !== 'submitting';
 
@@ -589,7 +600,12 @@ function App() {
       // day_type is the reporting-friendly category; `flew` is kept as a derived boolean so the
       // existing dashboard ingest (which reads meta.flew) keeps working unchanged.
       day_type: dayType, flew: didFly,
-      reason: dayType === 'nofly' ? reasonFinal : '',
+      // SPLIT DAY (30 Jul 2026). `day_parts` is the new truth when present: each half is worth
+      // 0.5 of a day, so AM flew + PM weather is 0.5 flown + 0.5 weather and the day still totals
+      // 1.0 man-day. Absent on a normal day and on every historical manifest, and the ingest
+      // falls back to the whole-day `day_type` in that case, so nothing already reported moves.
+      day_parts: splitDay ? { am: dayType, pm: dayTypePm } : null,
+      reason: (dayType === 'nofly' || (splitDay && dayTypePm === 'nofly')) ? reasonFinal : '',
       // Each coverage screenshot carries its OWN tied location. `areas` is the structured record
       // (image ↔ suburb/postcode/state); `area_flown` is the joined free-text kept for the existing ingest.
       areas: (didFly && covers.length) ? covers.map((c, i) => ({
@@ -1039,9 +1055,12 @@ function App() {
             Access-verified relay). Never touches the upload flow. */}
         {dutyOn && <DraPanel opId={opId} date={date} />}
 
-        {/* day type — the one required choice each day; maps 1:1 to the reporting categories */}
+        {/* day type — the one required choice each day; maps 1:1 to the reporting categories.
+            Splittable into AM/PM since 30 Jul 2026 so a half-lost day reports honestly. */}
         <div>
-          <label style={formStyles.label}>What kind of day was it?</label>
+          <label style={formStyles.label}>
+            {splitDay ? 'What kind of day was it? · MORNING' : 'What kind of day was it?'}
+          </label>
           <select className="ar-field" style={formStyles.field} value={dayType}
             onChange={(e) => setDayType(e.target.value)}>
             <option value="flew">Flew / captured</option>
@@ -1050,7 +1069,68 @@ function App() {
             <option value="repl">RePL study</option>
             <option value="extract">Image Extraction</option>
           </select>
+
+          {/* One tap. Default OFF, so a normal day is exactly as many taps as before. */}
+          <button
+            type="button"
+            onClick={() => setSplitDay((v) => !v)}
+            style={{
+              marginTop: 8, background: 'none', border: 'none', padding: 0,
+              color: '#0072B2', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              textDecoration: 'underline', textUnderlineOffset: 3,
+            }}
+          >
+            {splitDay ? '− My day was all the same' : '+ My day was split (AM / PM were different)'}
+          </button>
+
+          {splitDay && (
+            <div style={{ marginTop: 12 }}>
+              <label style={formStyles.label}>What kind of day was it? · AFTERNOON</label>
+              <select className="ar-field" style={formStyles.field} value={dayTypePm}
+                onChange={(e) => setDayTypePm(e.target.value)}>
+                <option value="flew">Flew / captured</option>
+                <option value="nofly">Couldn’t fly</option>
+                <option value="off">Day off</option>
+                <option value="repl">RePL study</option>
+                <option value="extract">Image Extraction</option>
+              </select>
+              <div style={{ fontSize: 12, color: '#5A6272', marginTop: 8, lineHeight: 1.55 }}>
+                Each half counts as half a day, so a morning of flying and a washed-out afternoon
+                reports as <b>0.5 flown + 0.5 couldn’t fly</b> — not a whole day of either. Your
+                day still totals one day.
+              </div>
+            </div>
+          )}
         </div>
+
+        {/* SPLIT-DAY REASON (30 Jul 2026). When one half flew and the other did not, `didFly` is
+            true so the chain below renders the FLYING branch and the "why couldn't you fly?"
+            question never appears — yet validation requires a reason, which would strand the
+            pilot on a form that cannot be submitted. Render it here as well in exactly that case. */}
+        {didFly && anyNoFly && (
+          <div style={{ animation: 'ar-pop .25s ease' }}>
+            <FieldLabel done={reasonDone}>
+              Why couldn’t you fly in the {dayTypePm === 'nofly' ? 'afternoon' : 'morning'}?
+            </FieldLabel>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+              {NO_FLY_REASONS.map(r => (
+                <button key={r} onClick={() => setReason(r)}
+                  style={{ padding: '9px 14px', borderRadius: 999, fontSize: 13.5, fontWeight: 600,
+                    border: `1.5px solid ${reason === r ? NAVY : LINE}`,
+                    background: reason === r ? NAVY : '#fff', color: reason === r ? '#fff' : MUTED }}>{r}</button>
+              ))}
+            </div>
+            {reason === 'Other' && (
+              <input className="ar-field" style={{ ...formStyles.field, marginTop: 10 }}
+                placeholder="Briefly, what stopped capture?"
+                value={reasonOther} onChange={(e) => setReasonOther(e.target.value)} />
+            )}
+            <div style={formStyles.hint}>
+              Half of {prettyDate(date)} is recorded as non‑production, so only the half you flew
+              counts toward your target.
+            </div>
+          </div>
+        )}
 
         {/* day-type branch */}
         {didFly ? (
