@@ -266,7 +266,7 @@ function App() {
   const [date, setDate] = useState(todayISO());
   // The day-type is the ONE required choice each day — it maps 1:1 to the reporting categories
   // (flew / weather-or-blocked / day off / RePL study). Replaces the old flew yes/no.
-  const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'off' | 'repl' | 'extract'
+  const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'other' | 'repl' | 'extract' | 'off' | 'leave'
   // SPLIT DAY (30 Jul 2026, pilots' request via Damien). A day is often two different days: drive
   // out, fly the morning, weather shuts it down after lunch. Reporting that whole day as "Flew"
   // hides the lost half; reporting it as "Couldn't fly" throws away real captured work. So the
@@ -274,6 +274,11 @@ function App() {
   // is what keeps every existing manifest, the ingest and the board numbers working unchanged.
   const [splitDay, setSplitDay] = useState(false);
   const [dayTypePm, setDayTypePm] = useState('nofly');
+  // GENERIC "other work" (Damien, 6 Aug 2026): iGuide scanning is only the first of these. Rather
+  // than adding a new day type — and a code change, a deploy and a report column — every time the
+  // crew picks up a new kind of non-flying job, ONE type carries a free-text description. The day
+  // still classifies as WORKED-not-flying for the target maths; the words just say what it was.
+  const [workNote, setWorkNote] = useState('');
   // Which drone was flown TODAY — every core pilot now carries both an Air 3S and a Lito X1
   // (Damien also has the Matrice 4E), and each drone hands over telemetry differently, so the
   // file picker's accepted types + on-screen instructions key off this (25 Jul 2026).
@@ -581,6 +586,8 @@ function App() {
   }
   if (anyNoFly && !reason) errors.push('Pick why you couldn\u2019t fly.');
   if (anyNoFly && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
+  if ((dayType === 'other' || (splitDay && dayTypePm === 'other')) && !workNote.trim())
+    errors.push('You picked Other work \u2014 type what the work was (e.g. iGuide scanning).');
   if (splitDay && dayType === dayTypePm) errors.push('AM and PM are the same \u2014 untick the split, or pick two different halves.');
   const reasonFinal = reason === 'Other' ? (reasonOther.trim() || 'Other') : reason;
   const canSubmit = errors.length === 0 && status !== 'submitting';
@@ -599,7 +606,7 @@ function App() {
       capture_date: date,
       // day_type is the reporting-friendly category; `flew` is kept as a derived boolean so the
       // existing dashboard ingest (which reads meta.flew) keeps working unchanged.
-      day_type: dayType, flew: didFly,
+      day_type: dayType, flew: didFly, work_note: workNote.trim(),
       // SPLIT DAY (30 Jul 2026). `day_parts` is the new truth when present: each half is worth
       // 0.5 of a day, so AM flew + PM weather is 0.5 flown + 0.5 weather and the day still totals
       // 1.0 man-day. Absent on a normal day and on every historical manifest, and the ingest
@@ -944,7 +951,7 @@ function App() {
   }
 
   const reset = () => {
-    setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setDayType('flew');
+    setFiles([]); setDecoded({}); setNotes(''); setReason(''); setReasonOther(''); setWorkNote(''); setDayType('flew');
     csvCacheRef.current = {};   // free the memoised multi-MB CSV strings
     clearCovers();
     dateTouchedRef.current = false;
@@ -1065,10 +1072,24 @@ function App() {
             onChange={(e) => setDayType(e.target.value)}>
             <option value="flew">Flew / captured</option>
             <option value="nofly">Couldn’t fly</option>
-            <option value="off">Day off</option>
+            <option value="other">Other work (no flying) — type what it was</option>
             <option value="repl">RePL study</option>
             <option value="extract">Image Extraction</option>
+            <option value="off">Day off</option>
+            <option value="leave">Annual leave / holiday</option>
           </select>
+
+          {(dayType === 'other' || (splitDay && dayTypePm === 'other')) && (
+            <div style={{ marginTop: 10, animation: 'ar-pop .25s ease' }}>
+              <input className="ar-field" style={formStyles.field}
+                placeholder="What was the work? e.g. iGuide scanning"
+                value={workNote} onChange={(e) => setWorkNote(e.target.value)} />
+              <div style={formStyles.hint}>
+                This counts as a work day, not a flying day, so it never counts against your
+                capture target. Just say what you were doing.
+              </div>
+            </div>
+          )}
 
           {/* One tap. Default OFF, so a normal day is exactly as many taps as before. */}
           <button
@@ -1090,9 +1111,11 @@ function App() {
                 onChange={(e) => setDayTypePm(e.target.value)}>
                 <option value="flew">Flew / captured</option>
                 <option value="nofly">Couldn’t fly</option>
-                <option value="off">Day off</option>
+                <option value="other">Other work (no flying) — type what it was</option>
                 <option value="repl">RePL study</option>
                 <option value="extract">Image Extraction</option>
+                <option value="off">Day off</option>
+                <option value="leave">Annual leave / holiday</option>
               </select>
               <div style={{ fontSize: 12, color: '#5A6272', marginTop: 8, lineHeight: 1.55 }}>
                 Each half counts as half a day, so a morning of flying and a washed-out afternoon
@@ -1290,6 +1313,27 @@ function App() {
               <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5 }}>Logged as a rest day (leave / RDO / public holiday). It won’t count against your capture target. Add the leave type in the notes below if it helps.</div>
             </div>
           </div>
+        ) : dayType === 'other' ? (
+          <div style={{ background: '#EDF7F2', border: '1px solid #C6E4D5', borderRadius: 12, padding: '13px 15px' }}>
+            <div style={{ fontWeight: 700, color: '#1E6B4A', fontSize: 14.5, marginBottom: 3 }}>
+              ▣ Other work — {prettyDate(date)}
+            </div>
+            <div style={{ fontSize: 13, color: '#2C5F49', lineHeight: 1.5 }}>
+              A working day with no flying — iGuide scanning, site visits, whatever you typed above.
+              It counts as a full work day in the team report and is never counted against your
+              capture target, because targets are measured on days actually flown.
+            </div>
+          </div>
+        ) : dayType === 'leave' ? (
+          <div style={{ background: '#FDF3EA', border: '1px solid #EFD8C2', borderRadius: 12, padding: '13px 15px' }}>
+            <div style={{ fontWeight: 700, color: '#8A4B12', fontSize: 14.5, marginBottom: 3 }}>
+              ☀ Annual leave — {prettyDate(date)}
+            </div>
+            <div style={{ fontSize: 13, color: '#7A4A1E', lineHeight: 1.5 }}>
+              Recorded as leave, which is kept separate from a day off so the report shows you were
+              away rather than simply not working. No files needed.
+            </div>
+          </div>
         ) : dayType === 'repl' ? (
           <div style={{ animation: 'ar-pop .25s ease' }}>
             <div style={{ background: '#FBF3E4', border: '1px solid #E7D3AC', borderRadius: 12, padding: '14px 16px' }}>
@@ -1341,6 +1385,8 @@ function App() {
                   : dayType === 'nofly' ? 'Submit no‑fly day'
                   : dayType === 'off' ? 'Submit day off'
                   : dayType === 'repl' ? 'Submit study day'
+                  : dayType === 'other' ? 'Submit work day'
+                  : dayType === 'leave' ? 'Submit leave day'
                   : 'Submit extraction day')}
           </button>
           {status !== 'submitting' && errors.length > 0 && (opId || files.length > 0 || dayType !== 'flew') && (
