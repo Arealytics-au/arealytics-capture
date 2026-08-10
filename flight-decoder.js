@@ -35,9 +35,19 @@
   }
 
   // Air 3S wide lens = fixed f/1.8; Matrice 4E aperture never opens below f/2.8.
+  // ALL SIX Lito airframes, from the Equipment MASTER sheet (10 Aug 2026). This list had only two
+  // of them, and labelled 1581FB34C25CE0031ZGB as Paul's — superseded 28 Jul when Damien confirmed
+  // it is MARC'S. The effect was cosmetic but wrong: aperture cannot separate a Lito (f/1.7) from
+  // an Air 3S (f/1.8), so any unlisted Lito showed to the pilot as "Mavic Air 3S" at upload time.
+  // Keep in step with FLEET_SNS in unified_bake.py — a serial confirmed anywhere gets swept
+  // everywhere, never just into the file at hand.
   const FLEET_SNS = { '1581F7FVC263U00D35JB': 'Matrice 4E',
-    '1581FB34C25CE003223N': 'DJI Lito X1', // Lucas Moy
-    '1581FB34C25CE0031ZGB': 'DJI Lito X1', // Paul McConnell
+    '1581FB34C25CE003223N': 'DJI Lito X1', // Lucas Moy      (VIC)
+    '1581FB34C25CE0031ZGB': 'DJI Lito X1', // Marc Margot    (NSW)
+    '1581FB34C25CP00346XN': 'DJI Lito X1', // Paul McConnell (NSW) — C25CP block, not C25CE
+    '1581FB34C25CG0032QSJ': 'DJI Lito X1', // Jakob Kelly    (VIC) — C25CG block, not C25CE
+    '1581FB34C25CE0031UUP': 'DJI Lito X1', // Joe Arthey     (WA)
+    '1581FB34C25CE0031VJK': 'DJI Lito X1', // Damien Poole   (QLD)
   };
   function detectModel(fnums, aircraftSn, rawName) {
     if (aircraftSn && FLEET_SNS[aircraftSn]) return FLEET_SNS[aircraftSn];
