@@ -756,7 +756,46 @@ function App() {
   //
   // Standalone (not embedded) there IS no Access session, so this cannot be filed. It fails LOUD
   // rather than pretending: the operator is told the files landed but the record did not.
-  function relaySubmission(meta, digests, coverCount) {
+  // RETRY (12 Aug 2026). Paul submitted, his 25 files landed, and this returned "no response from
+  // the compliance service" — so he was told his record had not filed and had to decide, standing in
+  // a field, whether to tap again. Diagnosed the same afternoon: Apps Script enforces a PER-MINUTE
+  // quota and answers 404 when it is tripped. Spaced calls succeed 8 times out of 8; bursts fail
+  // about one in four. It is transient, and a single attempt was never going to be enough.
+  //
+  // Retrying a WRITE is only safe because the server deduplicates, and that is not an assumption:
+  // Paul tapped Submit three times that afternoon and the register holds exactly ONE record,
+  // SUBM-2026-0103. The gateway keys on (operator, capture_date) and replaces rather than appends,
+  // which is the same guarantee the error message has always promised the operator.
+  //
+  // The pauses are long because the quota is per MINUTE — retrying instantly just spends the same
+  // exhausted budget. 3s then 15s, so a transient failure costs the pilot a moment of waiting
+  // instead of an error screen and a decision.
+  //
+  // `onRetry` keeps the operator informed while this happens. Three attempts can take over a minute,
+  // and a progress line that has not moved for that long reads as a frozen app — which is what makes
+  // someone force-quit mid-submission. It says what is happening, so waiting feels like progress.
+  function relaySubmission(meta, digests, coverCount, onRetry) {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    return (async () => {
+      let last = { ok: false, error: 'no response from the compliance service' };
+      const waits = [0, 3000, 15000];
+      for (let i = 0; i < waits.length; i++) {
+        if (waits[i]) {
+          // `i` IS the retry number: waits[0] is the first attempt, so waits[1] is retry 1 of 2.
+          if (onRetry) onRetry('Compliance service busy — retrying (' + i + ' of ' + (waits.length - 1) + ')…');
+          await sleep(waits[i]);
+        }
+        last = await relaySubmissionOnce(meta, digests, coverCount);
+        if (last.ok) return last;
+        // Never retry a REFUSAL — a rejected payload or a missing Access session fails the same way
+        // every time, and hammering it just delays telling the operator something they must act on.
+        if (!/no response from the compliance service/i.test(last.error || '')) return last;
+      }
+      return last;
+    })();
+  }
+
+  function relaySubmissionOnce(meta, digests, coverCount) {
     return new Promise((resolve) => {
       if (window.parent === window) {
         resolve({ ok: false, error: 'not signed in — open the daily log from the Arealytics field app so the submission can be recorded' });
@@ -879,7 +918,7 @@ function App() {
     // states what was actually delivered, so it must not be written before delivery is known.
     // Its failure never fails the submission — the files are already safely in Drive — but it is
     // reported, because an unrecorded submission is a hole in the evidence chain, not a detail.
-    const recorded = await relaySubmission(meta, digests, coverAttempted.length);
+    const recorded = await relaySubmission(meta, digests, coverAttempted.length, setProgress);
     driveRecorded = recorded;
 
     // ── CONFIRM RECEIPT — the SOURCE OF TRUTH. Reads what actually landed via verifyDrive()'s JSONP call
