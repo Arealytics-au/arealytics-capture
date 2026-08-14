@@ -928,13 +928,29 @@ function App() {
     const landed = await verifyDrive(meta.operator, meta.capture_date);
     const problems = [];
     if (landed) {
-      const has = new Set(landed);
-      const missFiles = attempted.filter(n => !has.has(n)).concat(failed);
-      const missCovers = coverAttempted.filter(n => !has.has(n)).concat(coverFailed);
+      // MATCH FILENAMES CASE-INSENSITIVELY (13 Aug 2026). Joe was told 10 of his 27 flight files had
+      // not been received. All ten were sitting in Drive, correct and complete. The comparison was an
+      // exact Set match, and the two sides disagreed only on the case of the extension:
+      //   Drive held  DJI_20260813104443_0001_D.SRT
+      //   the form wanted DJI_20260813104443_0001_D.srt
+      // The cause is upstream and benign. A drone-written sidecar arrives as .SRT, while an SRT this
+      // form EXTRACTS from an MP4 is named with a lowercase .srt (see the upName line above). Drive's
+      // own lookup is case-insensitive, so uploading the extracted x.srt finds the existing x.SRT and
+      // REPLACES ITS CONTENT, keeping the original uppercase name. The file is right, the bytes are
+      // right, only the label differs — and the check called it a loss.
+      //
+      // That is the worst kind of alarm: it tells a pilot standing in a field to re-send files that
+      // already arrived. Getting this wrong twice teaches them to ignore the warning on the day it is
+      // finally real, which costs a genuine day of flying. A filesystem-case difference is never a
+      // delivery failure, so it must never be reported as one.
+      const has = new Set(landed.map((n) => String(n).toLowerCase()));
+      const arrived = (n) => has.has(String(n).toLowerCase());
+      const missFiles = attempted.filter((n) => !arrived(n)).concat(failed);
+      const missCovers = coverAttempted.filter((n) => !arrived(n)).concat(coverFailed);
       const totalFiles = attempted.length + failed.length;
       if (missFiles.length) problems.push(`${totalFiles - missFiles.length}/${totalFiles} flight files confirmed — not received: ${missFiles.join(', ')}.`);
       if (missCovers.length) problems.push(`Coverage screenshot${missCovers.length > 1 ? 's' : ''} not received: ${missCovers.join(', ')}.`);
-      if (!has.has(manifestName)) problems.push('The day’s summary wasn’t recorded.');
+      if (!arrived(manifestName)) problems.push('The day’s summary wasn’t recorded.');
     } else {
       // verifyDrive() exhausted every retry with no answer. This is NOT proof the files failed — they may
       // well have landed — but it is equally not proof they did, so it must NEVER fall through to a plain
