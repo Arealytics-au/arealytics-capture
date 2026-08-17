@@ -84,12 +84,21 @@ const ROSTER = [
   { id: 'op-justin', name: 'Justin',         state: 'SA' },
 ];
 
-// Why a NON-FLYING, NON-STUDY, NON-OFF day happened. RePL study + Day off are now their own
-// day-types (first-class buttons), so they're intentionally not in this weather/blocker list.
+// Why a NON-FLYING, NON-OFF day happened. Day off is its own day-type (first-class button), so
+// it's intentionally not in this weather/blocker list. RePL study was too until 17 Aug 2026 —
+// removed as a day type once every core operator's RePL was complete, so it can no longer be
+// selected; a day already logged against it in the past still shows correctly on the report,
+// folded into "other work" there.
 const NO_FLY_REASONS = [
   'Rain', 'Storms', 'High wind', 'Low cloud / poor light', 'Fog',
   'Equipment fault', 'CASA / permit hold', 'Site access', 'Other',
 ];
+// Damien, 17 Aug 2026: "if they are not flying or doing image extraction... they need to put
+// their reason for what they are doing that day... we need to know why they were away and what
+// they were doing and it needs to show on the report." 'nofly' already has its own mandatory
+// reason picker (NO_FLY_REASONS below); this covers the other three non-flying, non-extraction
+// day types with one shared typed-reason box (rendered where dayType is chosen, further down).
+const NEEDS_NOTE = (t) => t === 'other' || t === 'off' || t === 'leave';
 
 // palette
 const NAVY = '#0A1F5C', ORANGE = '#FF7A1A', INK = '#0E1320',
@@ -265,8 +274,10 @@ function App() {
   const [otherName, setOtherName] = useState('');
   const [date, setDate] = useState(todayISO());
   // The day-type is the ONE required choice each day — it maps 1:1 to the reporting categories
-  // (flew / weather-or-blocked / day off / RePL study). Replaces the old flew yes/no.
-  const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'other' | 'repl' | 'extract' | 'off' | 'leave'
+  // (flew / weather-or-blocked / other work / extraction / day off / leave). Replaces the old flew
+  // yes/no. 'repl' retired 17 Aug 2026 — RePL is complete for every core operator, so it is no
+  // longer offered; a day already logged against it reports as other work on the dashboard.
+  const [dayType, setDayType] = useState('flew'); // 'flew' | 'nofly' | 'other' | 'extract' | 'off' | 'leave'
   // SPLIT DAY (30 Jul 2026, pilots' request via Damien). A day is often two different days: drive
   // out, fly the morning, weather shuts it down after lunch. Reporting that whole day as "Flew"
   // hides the lost half; reporting it as "Couldn't fly" throws away real captured work. So the
@@ -586,8 +597,8 @@ function App() {
   }
   if (anyNoFly && !reason) errors.push('Pick why you couldn\u2019t fly.');
   if (anyNoFly && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
-  if ((dayType === 'other' || (splitDay && dayTypePm === 'other')) && !workNote.trim())
-    errors.push('You picked Other work \u2014 type what the work was (e.g. iGuide scanning).');
+  if ((NEEDS_NOTE(dayType) || (splitDay && NEEDS_NOTE(dayTypePm))) && !workNote.trim())
+    errors.push('Add a short reason for the day \u2014 what the work was, or why you were away.');
   if (splitDay && dayType === dayTypePm) errors.push('AM and PM are the same \u2014 untick the split, or pick two different halves.');
   const reasonFinal = reason === 'Other' ? (reasonOther.trim() || 'Other') : reason;
   const canSubmit = errors.length === 0 && status !== 'submitting';
@@ -1128,23 +1139,33 @@ function App() {
             <option value="flew">Flew / captured</option>
             <option value="nofly">Couldn’t fly</option>
             <option value="other">Other work (no flying) — type what it was</option>
-            <option value="repl">RePL study</option>
             <option value="extract">Image Extraction</option>
             <option value="off">Day off</option>
             <option value="leave">Annual leave / holiday</option>
           </select>
 
-          {(dayType === 'other' || (splitDay && dayTypePm === 'other')) && (
-            <div style={{ marginTop: 10, animation: 'ar-pop .25s ease' }}>
-              <input className="ar-field" style={formStyles.field}
-                placeholder="What was the work? e.g. iGuide scanning"
-                value={workNote} onChange={(e) => setWorkNote(e.target.value)} />
-              <div style={formStyles.hint}>
-                This counts as a work day, not a flying day, so it never counts against your
-                capture target. Just say what you were doing.
+          {(NEEDS_NOTE(dayType) || (splitDay && NEEDS_NOTE(dayTypePm))) && (() => {
+            // Which half actually needs the note. Split days can differ, so this picks whichever
+            // half is Other/Off/Leave — PM wins if both halves need it, since one shared box can
+            // only speak to one reason at a time (the same limit the AM/PM split already lives with).
+            const t = (splitDay && NEEDS_NOTE(dayTypePm)) ? dayTypePm : dayType;
+            const copy = {
+              other: { ph: 'What was the work? e.g. iGuide scanning',
+                hint: 'This counts as a work day, not a flying day, so it never counts against your capture target. Just say what you were doing.' },
+              off: { ph: 'Why were you off? e.g. sick, rostered day off, personal',
+                hint: 'Damien needs this to explain the day to management if asked — just a few words is fine.' },
+              leave: { ph: 'What’s the leave for? e.g. annual leave, personal leave',
+                hint: 'Damien needs this to explain the day to management if asked — just a few words is fine.' },
+            }[t];
+            return (
+              <div style={{ marginTop: 10, animation: 'ar-pop .25s ease' }}>
+                <input className="ar-field" style={formStyles.field}
+                  placeholder={copy.ph}
+                  value={workNote} onChange={(e) => setWorkNote(e.target.value)} />
+                <div style={formStyles.hint}>{copy.hint}</div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* One tap. Default OFF, so a normal day is exactly as many taps as before. */}
           <button
@@ -1167,7 +1188,6 @@ function App() {
                 <option value="flew">Flew / captured</option>
                 <option value="nofly">Couldn’t fly</option>
                 <option value="other">Other work (no flying) — type what it was</option>
-                <option value="repl">RePL study</option>
                 <option value="extract">Image Extraction</option>
                 <option value="off">Day off</option>
                 <option value="leave">Annual leave / holiday</option>
@@ -1365,7 +1385,7 @@ function App() {
           <div style={{ animation: 'ar-pop .25s ease' }}>
             <div style={{ background: '#F4F6FB', border: `1px solid ${LINE}`, borderRadius: 12, padding: '14px 16px' }}>
               <div style={{ fontWeight: 700, color: NAVY, fontSize: 14.5, marginBottom: 3 }}>◐ Day off — {prettyDate(date)}</div>
-              <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5 }}>Logged as a rest day (leave / RDO / public holiday). It won’t count against your capture target. Add the leave type in the notes below if it helps.</div>
+              <div style={{ fontSize: 13, color: MUTED, lineHeight: 1.5 }}>Logged as a rest day. It won’t count against your capture target. Your reason above shows on the team report so Damien can explain the day if asked.</div>
             </div>
           </div>
         ) : dayType === 'other' ? (
@@ -1386,14 +1406,7 @@ function App() {
             </div>
             <div style={{ fontSize: 13, color: '#7A4A1E', lineHeight: 1.5 }}>
               Recorded as leave, which is kept separate from a day off so the report shows you were
-              away rather than simply not working. No files needed.
-            </div>
-          </div>
-        ) : dayType === 'repl' ? (
-          <div style={{ animation: 'ar-pop .25s ease' }}>
-            <div style={{ background: '#FBF3E4', border: '1px solid #E7D3AC', borderRadius: 12, padding: '14px 16px' }}>
-              <div style={{ fontWeight: 700, color: '#8A5A0E', fontSize: 14.5, marginBottom: 3 }}>◆ RePL study — {prettyDate(date)}</div>
-              <div style={{ fontSize: 13, color: '#7A5A2A', lineHeight: 1.5 }}>Counts as a work day toward your licence — it shows in the team report as RePL progress, not a lost day. Note the module or hours below.</div>
+              away rather than simply not working. No files needed — just the reason above.
             </div>
           </div>
         ) : (
@@ -1439,7 +1452,6 @@ function App() {
               : (didFly ? 'Submit today’s capture'
                   : dayType === 'nofly' ? 'Submit no‑fly day'
                   : dayType === 'off' ? 'Submit day off'
-                  : dayType === 'repl' ? 'Submit study day'
                   : dayType === 'other' ? 'Submit work day'
                   : dayType === 'leave' ? 'Submit leave day'
                   : 'Submit extraction day')}
