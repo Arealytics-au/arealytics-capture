@@ -703,7 +703,13 @@ function App() {
       const cleanup = () => { try { delete window[cb]; } catch (e) { window[cb] = undefined; } if (s.parentNode) s.remove(); };
       const finish = (val) => { if (done) return; done = true; cleanup(); resolve(val); };
       window[cb] = (data) => finish(data && Array.isArray(data.files) ? data.files : null);
-      s.onerror = () => finish(null);
+      // WHY a verify failed is the difference between "slow" and "the service is gone" (18 Aug
+      // 2026). A <script> pointed at a non-2xx response fires onerror in every current browser,
+      // and a retired Apps Script deployment answers 404 with an HTML page — so onerror on every
+      // attempt is strong evidence the endpoint itself is dead, not merely busy. A timeout means
+      // the opposite: something answered slowly, or not at all, and the files may well be fine.
+      // Recorded so the message the operator reads can tell them which of those it is.
+      s.onerror = () => { verifyDrive.lastWhy = 'error'; finish(null); };
       s.onload = () => finish(null);   // script loaded but callback never ran this attempt
       const q = 'verify=1&op=' + encodeURIComponent(operator) + '&date=' + encodeURIComponent(date) + '&callback=' + cb;
       s.src = CONFIG.DRIVE_ENDPOINT + (CONFIG.DRIVE_ENDPOINT.indexOf('?') === -1 ? '?' : '&') + q;
@@ -719,9 +725,10 @@ function App() {
   // they saw a clean success screen — this replaced that one-shot check.)
   async function verifyDrive(operator, date) {
     const timeouts = [5000, 7000, 12000];
+    verifyDrive.lastWhy = '';          // reset per submission; set to 'error' by a non-2xx response
     for (let attempt = 0; attempt < timeouts.length; attempt++) {
       const result = await verifyDriveOnce(operator, date, timeouts[attempt]);
-      if (result) return result;
+      if (result) { verifyDrive.lastWhy = ''; return result; }
       if (attempt < timeouts.length - 1) await sleep(900);
     }
     return null;
@@ -970,7 +977,20 @@ function App() {
       // resubmit; staying silent costs a real, undetected gap in the compliance record. Resubmitting is
       // always safe (server-side de-dupe by filename), so the safe default is to ask, not assume.
       const allFailed = failed.concat(coverFailed);
-      problems.push('Couldn’t confirm this submission was received — it may not have gone through.');
+      // TELL THEM WHICH FAILURE THIS IS (18 Aug 2026). Damien: "why the hell do we keep getting
+      // error messages with this??!! It happens daily." Part of that is that this branch gave the
+      // SAME words, ending in "tap Submit again", whether the service was merely slow or was
+      // returning 404 to every request because its deployment had been retired. In the second
+      // case retrying is futile by definition: the operator taps Submit over and over, watches it
+      // fail identically each time, and nothing they can do will ever work. Saying so plainly is
+      // both truer and kinder than implying the fix is in their hands.
+      if (verifyDrive.lastWhy === 'error') {
+        problems.push('The upload service is not responding (it is returning an error, not a result). '
+          + 'Your files have NOT been sent, and re-submitting will not help until it is fixed. '
+          + 'Send Damien a message, keep the files on your card, and submit again once he says it is back.');
+      } else {
+        problems.push('Couldn’t confirm this submission was received — it may not have gone through.');
+      }
       if (!manifestDelivered) problems.push('The day’s summary couldn’t be sent.');
       if (allFailed.length) problems.push(`Also couldn’t send: ${allFailed.join(', ')}.`);
     }
@@ -982,7 +1002,12 @@ function App() {
         + (recorded.error || 'unknown reason') + '. Tell Damien — the files are safe, the record is missing.');
     }
     if (problems.length) {
-      const err = new Error(problems.join(' ') + ' Tap Submit again to re-send — anything already received is replaced, not duplicated.');
+      // The retry advice is correct for a partial or unconfirmed delivery, and actively wrong when
+      // the service itself is down — see the branch above.
+      const retryAdvice = verifyDrive.lastWhy === 'error'
+        ? ''
+        : ' Tap Submit again to re-send — anything already received is replaced, not duplicated.';
+      const err = new Error(problems.join(' ') + retryAdvice);
       err.failed = failed;
       err.unconfirmed = !landed;
       throw err;                                 // surfaced on the error screen with the exact missing pieces
