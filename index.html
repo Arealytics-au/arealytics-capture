@@ -735,12 +735,31 @@ function App() {
   }
   // Retry one upload a few times with backoff. SAFE to retry: the Apps Script de-dupes by filename
   // (removeExisting), so a re-sent file replaces rather than stacks. Throws only after all tries fail.
+  // BACKOFF MUST OUTLAST A PER-MINUTE QUOTA (18 Aug 2026). This retried after 700ms then 1400ms —
+  // a 2-second window — and Apps Script's quota is per MINUTE. Once it trips, every retry inside
+  // that window spends the same exhausted budget and fails identically, so the file is written off
+  // as lost while the service is merely busy. Damien submitted 37 files and got "13/37 flight files
+  // confirmed": the first batch went through, the quota tripped, and the remaining 24 burned their
+  // three attempts in two seconds and gave up.
+  //
+  // The same lesson was already applied to the compliance relay (3s/15s) and to the bake's readers
+  // (8s/20s) on 12 Aug — but not here, to the path that carries every actual FILE, which is the one
+  // that matters most. 2s, 20s then 60s means the last attempt lands on the far side of the minute
+  // boundary, which is the only thing that can actually clear a per-minute quota.
+  //
+  // Cost is bounded and only paid on failure: a file that would have been lost now waits ~82s
+  // before being declared lost, and a healthy upload is completely unaffected (first attempt, no
+  // sleep). Losing a flight log costs a re-drive; waiting is free.
+  const POST_BACKOFF_MS = [2000, 20000, 60000];
   async function postDriveRetry(payload, tries) {
-    tries = tries || 3;
+    tries = tries || POST_BACKOFF_MS.length + 1;
     let lastErr;
     for (let attempt = 1; attempt <= tries; attempt++) {
       try { return await postDrive(payload); }
-      catch (e) { lastErr = e; if (attempt < tries) await sleep(700 * attempt); }
+      catch (e) {
+        lastErr = e;
+        if (attempt < tries) await sleep(POST_BACKOFF_MS[attempt - 1] || 60000);
+      }
     }
     throw lastErr;
   }
