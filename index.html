@@ -262,30 +262,49 @@ function AreaAutocomplete({ cover, onChange, index, home }) {
         )}
       </div>
     </div>
-    {/* IS THIS A REFLY? — Damien, 19 Aug 2026. A reflight re-covers ground that was ALREADY counted,
-        so its properties must NEVER be added to the national universe (that would double-count
-        coverage and overstate how much of Australia we have captured). They still belong to the
-        pilot: it is real work on a real day and it counts toward their target.
-        PER AREA, not per day, because a pilot can fly new ground AND a refly on the same day — a
-        day-level flag would wrongly discard the new ground. Asked here because the pilot is the
-        only person who knows at the time; the previous mechanism relied on someone typing "REFLY"
-        onto a map polygon days later, and in five days it was never once used. */}
-    <label
-      style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginTop: 8, cursor: 'pointer',
-               padding: '9px 11px', borderRadius: 10,
-               border: `1px solid ${cover.refly ? '#E69F00' : LINE}`,
-               background: cover.refly ? '#FFF8EC' : '#FBFCFE' }}>
-      <input type="checkbox" checked={!!cover.refly} style={{ marginTop: 2, width: 17, height: 17, flexShrink: 0 }}
-        onChange={(e) => onChange({ refly: e.target.checked })} />
-      <span style={{ fontSize: 13.5, lineHeight: 1.35, color: INK }}>
-        <b>This area is a REFLY</b> — re-covering ground already captured before.
-        <span style={{ display: 'block', color: MUTED, fontSize: 12.5, marginTop: 2 }}>
-          {cover.refly
-            ? 'Counts toward your day’s numbers, but not toward national coverage (it was counted the first time).'
-            : 'Leave unticked if this is new ground being captured for the first time.'}
-        </span>
-      </span>
-    </label>
+    {/* WAS THIS A REFLY? — Damien, 20 Aug 2026: "it has to be a stepped order that needs to be
+        selected or not before they move on or can submit."
+
+        Deliberately a REQUIRED Yes/No rather than a tick box. An unticked box is ambiguous: it
+        cannot tell "I considered it, it is new ground" apart from "I never looked at this". The
+        pilot is the only person who knows, and getting it wrong costs real coverage, so the form
+        makes them answer rather than letting silence stand in for No.
+
+        A reflight draws no polygon on the tracking map, so its properties never enter national
+        coverage. The answer decides whether this area's count credits the pilot only, or counts
+        as new ground. PER AREA, because a pilot can fly new ground and a reflight the same day. */}
+    <div
+      style={{ marginTop: 9, padding: '10px 12px', borderRadius: 10,
+               border: `1px solid ${cover.refly == null ? '#E69F00' : LINE}`,
+               background: cover.refly == null ? '#FFFAEB' : '#FBFCFE' }}>
+      <div style={{ fontSize: 13.5, fontWeight: 700, color: INK, marginBottom: 2 }}>
+        Was this area a REFLY?
+      </div>
+      <div style={{ fontSize: 12, color: MUTED, lineHeight: 1.4, marginBottom: 9 }}>
+        {cover.refly === true
+          ? 'Re-covering ground already captured. It counts toward your day, not toward new coverage.'
+          : cover.refly === false
+            ? 'New ground, captured for the first time.'
+            : 'You must answer this before you can submit.'}
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        {[['Yes — this is a refly', true], ['No — new ground', false]].map(([lab, val]) => (
+          <button
+            key={String(val)}
+            type="button"
+            onClick={() => onChange({ refly: val })}
+            style={{
+              flex: 1, padding: '10px 8px', borderRadius: 9, fontSize: 13.5, fontWeight: 700,
+              cursor: 'pointer',
+              border: `1.5px solid ${cover.refly === val ? (val ? '#B54708' : NAVY) : '#D8DEEC'}`,
+              background: cover.refly === val ? (val ? '#FFF4E5' : '#EEF2FB') : '#fff',
+              color: cover.refly === val ? (val ? '#8A4B00' : NAVY) : INK,
+            }}>
+            {lab}
+          </button>
+        ))}
+      </div>
+    </div>
     </>
   );
 }
@@ -620,6 +639,13 @@ function App() {
     // Every screenshot must carry its OWN suburb + postcode — that's the location tied to that photo.
     else if (covers.some(c => !(c.suburb && c.suburb.trim()) || !/^\d{4}$/.test((c.postcode || '').trim())))
       errors.push('Add the suburb and postcode next to each coverage screenshot.');
+    // REFLY is a required answer, not an optional tick. Silence must never be read as "No" —
+    // a missed reflight puts properties into national coverage that were already counted.
+    const unanswered = covers
+      .map((c, i) => (c.refly == null ? (c.suburb || '').trim() || `screenshot ${i + 1}` : null))
+      .filter(Boolean);
+    if (unanswered.length)
+      errors.push('Answer “Was this area a REFLY?” for ' + unanswered.join(', ') + '.');
   }
   if (anyNoFly && !reason) errors.push('Pick why you couldn\u2019t fly.');
   if (anyNoFly && reason === 'Other' && !reasonOther.trim()) errors.push('Add a short reason.');
@@ -660,7 +686,7 @@ function App() {
         // REFLY: this area re-covers already-counted ground. Credited to the pilot, excluded from
         // the national universe. Always emitted as a real boolean so a missing tick is an explicit
         // false rather than an absent key the pipeline has to guess about.
-        refly: !!c.refly,
+        refly: c.refly === true,
         state_picked: c.state || '' })) : [],
       area_flown: didFly ? covers.map(c => `${(c.suburb || '').trim()} ${(c.postcode || '').trim()}`.trim()).filter(Boolean).join(', ') : '',
       // Day-level summary of the per-area flags. NOT the source of truth (that is areas[].refly);
