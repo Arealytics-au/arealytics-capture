@@ -41,7 +41,9 @@
   // an Air 3S (f/1.8), so any unlisted Lito showed to the pilot as "Mavic Air 3S" at upload time.
   // Keep in step with FLEET_SNS in unified_bake.py — a serial confirmed anywhere gets swept
   // everywhere, never just into the file at hand.
-  const FLEET_SNS = { '1581F7FVC263U00D35JB': 'Matrice 4E',
+  const FLEET_SNS = { '1581F7FVC263U00D35JB': 'Matrice 4E', // RETIRED Aug 2026 (crashed) — kept
+                                                            // so older logs still resolve
+    '1581F7FV3267100CU4KP': 'Matrice 4E', // Damien Poole (QLD) — replacement, in service Aug 2026
     '1581FB34C25CE003223N': 'DJI Lito X1', // Lucas Moy      (VIC)
     '1581FB34C25CE0031ZGB': 'DJI Lito X1', // Marc Margot    (NSW)
     '1581FB34C25CP00346XN': 'DJI Lito X1', // Paul McConnell (NSW) — C25CP block, not C25CE
@@ -50,7 +52,19 @@
     '1581FB34C25CE0031VJK': 'DJI Lito X1', // Damien Poole   (QLD)
   };
   function detectModel(fnums, aircraftSn, rawName) {
-    if (aircraftSn && FLEET_SNS[aircraftSn]) return FLEET_SNS[aircraftSn];
+    // PREFIX MATCH, not exact. The decrypted logs emit a 16-character serial while this map is
+    // keyed on the 20-character register value, so `FLEET_SNS[aircraftSn]` could NEVER hit and
+    // this lookup has never once resolved a serial — it silently fell through to name matching
+    // the whole time. Same 16-vs-20 truncation fixed in unified_bake.py on 30 Jul and never
+    // carried across to the pilot form. 16-char floor so a fragment like '1581' (the leading
+    // block of every DJI serial) cannot confidently identify a specific airframe.
+    if (aircraftSn && aircraftSn.length >= 16) {
+      if (FLEET_SNS[aircraftSn]) return FLEET_SNS[aircraftSn];
+      const hit = Object.keys(FLEET_SNS)
+        .filter((k) => k.startsWith(aircraftSn) || aircraftSn.startsWith(k))
+        .sort((a, b) => b.length - a.length)[0];   // longest match wins = most specific
+      if (hit) return FLEET_SNS[hit];
+    }
     const n = String(rawName || '');
     if (/lito/i.test(n)) return 'DJI Lito X1';
     if (/matrice\s*4/i.test(n)) return 'Matrice 4E';
