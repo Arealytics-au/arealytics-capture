@@ -221,6 +221,7 @@ function AreaAutocomplete({ cover, onChange, index, home }) {
   const item = { padding: '9px 12px', fontSize: 14, color: INK, cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: 10 };
   const inp = { ...formStyles.field, padding: '10px 12px', fontSize: 14.5 };
   return (
+    <>
     <div style={{ display: 'flex', gap: 8, marginTop: 9 }}>
       <div style={wrap}>
         <input className="ar-field" style={inp} placeholder={`Suburb / area — screenshot ${index + 1}`}
@@ -261,6 +262,31 @@ function AreaAutocomplete({ cover, onChange, index, home }) {
         )}
       </div>
     </div>
+    {/* IS THIS A REFLY? — Damien, 19 Aug 2026. A reflight re-covers ground that was ALREADY counted,
+        so its properties must NEVER be added to the national universe (that would double-count
+        coverage and overstate how much of Australia we have captured). They still belong to the
+        pilot: it is real work on a real day and it counts toward their target.
+        PER AREA, not per day, because a pilot can fly new ground AND a refly on the same day — a
+        day-level flag would wrongly discard the new ground. Asked here because the pilot is the
+        only person who knows at the time; the previous mechanism relied on someone typing "REFLY"
+        onto a map polygon days later, and in five days it was never once used. */}
+    <label
+      style={{ display: 'flex', alignItems: 'flex-start', gap: 9, marginTop: 8, cursor: 'pointer',
+               padding: '9px 11px', borderRadius: 10,
+               border: `1px solid ${cover.refly ? '#E69F00' : LINE}`,
+               background: cover.refly ? '#FFF8EC' : '#FBFCFE' }}>
+      <input type="checkbox" checked={!!cover.refly} style={{ marginTop: 2, width: 17, height: 17, flexShrink: 0 }}
+        onChange={(e) => onChange({ refly: e.target.checked })} />
+      <span style={{ fontSize: 13.5, lineHeight: 1.35, color: INK }}>
+        <b>This area is a REFLY</b> — re-covering ground already captured before.
+        <span style={{ display: 'block', color: MUTED, fontSize: 12.5, marginTop: 2 }}>
+          {cover.refly
+            ? 'Counts toward your day’s numbers, but not toward national coverage (it was counted the first time).'
+            : 'Leave unticked if this is new ground being captured for the first time.'}
+        </span>
+      </span>
+    </label>
+    </>
   );
 }
 
@@ -631,8 +657,16 @@ function App() {
         // The OPERATOR'S home state is authoritative for attribution — a wrong-state autocomplete
         // pick must never re-state their work. The picked state is kept as state_picked for trace.
         postcode: (c.postcode || '').trim(), state: (op && op.state) || c.state || '',
+        // REFLY: this area re-covers already-counted ground. Credited to the pilot, excluded from
+        // the national universe. Always emitted as a real boolean so a missing tick is an explicit
+        // false rather than an absent key the pipeline has to guess about.
+        refly: !!c.refly,
         state_picked: c.state || '' })) : [],
       area_flown: didFly ? covers.map(c => `${(c.suburb || '').trim()} ${(c.postcode || '').trim()}`.trim()).filter(Boolean).join(', ') : '',
+      // Day-level summary of the per-area flags. NOT the source of truth (that is areas[].refly);
+      // it exists so a reader can answer "was there any refly today" without walking the list.
+      refly_any: !!(didFly && covers.some(c => c.refly)),
+      refly_all: !!(didFly && covers.length && covers.every(c => c.refly)),
       coverage_images: (didFly && covers.length) ? covers.map((c, i) => coverNameFor(c, i)) : [],
       coverage_image: (didFly && covers.length) ? coverNameFor(covers[0], 0) : '',   // first one, kept for the existing manifest reader
       decoded: didFly ? files.map(f => { const d = decoded[fkey(f)] || {}; return {
