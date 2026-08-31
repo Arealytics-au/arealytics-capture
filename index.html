@@ -961,6 +961,20 @@ function App() {
             digests.push({ name: upName, sha256: await sha256Hex(srtBlob), bytes: srtBlob.size });
           } else {
             const dataB64 = await fileToB64(f);
+            // A STALE HANDLE READS BACK EMPTY, NOT AS AN ERROR (31 Aug 2026, Jakob's 7 SRTs, twice).
+            // Attach files from the SD card, eject the card, tap Submit: on Windows/Chrome the
+            // FileReader resolves with an EMPTY result instead of throwing. The empty payload then
+            // sailed to the Apps Script, which rejected it ("missing file name/data") — but the POST
+            // is no-cors, so that rejection is unreadable, the file was counted as delivered, and the
+            // receipt check reported it missing with no reason a pilot could act on. His TXT logs
+            // live on local disk and all landed; every SRT came off the card and all failed,
+            // deterministically, on both submits. Base64 of a real file is ≥ its byte count, so a
+            // short read is PROOF the file is no longer readable — name the cause, fail fast, and
+            // never spend retries delivering nothing.
+            if (!dataB64 || dataB64.length < Math.max(64, f.size * 0.7)) {
+              throw new Error(f.name + ' could not be read from disk — if it came off the SD card, '
+                + 'the card must still be plugged in. Re-attach the file and Submit again.');
+            }
             await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
               name: upName, mimeType: f.type || 'application/octet-stream', dataB64 });
             digests.push({ name: upName, sha256: await sha256Hex(f), bytes: f.size });
@@ -976,7 +990,10 @@ function App() {
             } catch (e) { /* deliberate: sidecar only — the bake decodes the raw file itself */ }
           }
         } catch (e) {
-          failed.push(f.name);                 // record + keep going — do NOT abort the batch
+          // carry the REASON beside the name: "couldn't be read — re-attach" sends the pilot to the
+          // SD card; a bare filename sends them into a resubmit loop that fails identically
+          const why = String(e && e.message || '');
+          failed.push(/could not be read/.test(why) ? why : f.name);
         }
         if (i < files.length - 1) await sleep(250);   // gentle pacing between POSTs (none after the last)
       }
@@ -1040,9 +1057,53 @@ function App() {
       // already arrived. Getting this wrong twice teaches them to ignore the warning on the day it is
       // finally real, which costs a genuine day of flying. A filesystem-case difference is never a
       // delivery failure, so it must never be reported as one.
-      const has = new Set(landed.map((n) => String(n).toLowerCase()));
-      const arrived = (n) => has.has(String(n).toLowerCase());
-      const missFiles = attempted.filter((n) => !arrived(n)).concat(failed);
+      let has = new Set(landed.map((n) => String(n).toLowerCase()));
+      let arrived = (n) => has.has(String(n).toLowerCase());
+      // ONE AUTOMATIC REPAIR PASS (31 Aug 2026) before anything goes red. The receipt check knows
+      // exactly which files are absent; asking the pilot to "tap Submit again" made HIM the retry
+      // loop — and when the cause was a stale handle, his resubmit failed identically and taught
+      // him the form cannot be trusted. Re-send just the shortfall, re-reading each file fresh so
+      // a recoverable hiccup heals silently, then re-verify. A file whose handle is genuinely dead
+      // fails the empty-read guard above and lands in the red box WITH its cause and fix.
+      let shortfall = attempted.filter((n) => !arrived(n));
+      if (shortfall.length && meta.flew) {
+        setProgress('Re-sending ' + shortfall.length + ' file(s) that did not arrive…');
+        for (const name of shortfall) {
+          const f = files.find((x) => {
+            const dec2 = decoded[fkey(x)] || {};
+            const un = dec2.extractedSrt ? x.name.replace(/\.(mp4|mov|lrf)$/i, '.srt') : x.name;
+            return un.toLowerCase() === name.toLowerCase();
+          });
+          if (!f) continue;
+          try {
+            const dec2 = decoded[fkey(f)] || {};
+            if (dec2.extractedSrt) {
+              await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+                name, mimeType: 'application/x-subrip',
+                dataB64: btoa(unescape(encodeURIComponent(dec2.extractedSrt))) });
+            } else {
+              const b64 = await fileToB64(f);
+              if (!b64 || b64.length < Math.max(64, f.size * 0.7)) {
+                throw new Error(f.name + ' could not be read from disk — if it came off the SD card, '
+                  + 'the card must still be plugged in. Re-attach the file and Submit again.');
+              }
+              await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+                name, mimeType: f.type || 'application/octet-stream', dataB64: b64 });
+            }
+          } catch (e2) {
+            const why2 = String(e2 && e2.message || '');
+            if (/could not be read/.test(why2) && failed.indexOf(why2) === -1) failed.push(why2);
+          }
+        }
+        const landed2 = await verifyDrive(meta.operator, meta.capture_date);
+        if (landed2) {
+          has = new Set(landed2.map((n) => String(n).toLowerCase()));
+          arrived = (n) => has.has(String(n).toLowerCase());
+        }
+      }
+      const missFiles = attempted.filter((n) => !arrived(n))
+        .filter((n) => !failed.some((w) => w.indexOf(n) !== -1))
+        .concat(failed);
       const missCovers = coverAttempted.filter((n) => !arrived(n)).concat(coverFailed);
       const totalFiles = attempted.length + failed.length;
       if (missFiles.length) problems.push(`${totalFiles - missFiles.length}/${totalFiles} flight files confirmed — not received: ${missFiles.join(', ')}.`);
