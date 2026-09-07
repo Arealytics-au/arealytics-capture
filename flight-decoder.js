@@ -307,7 +307,50 @@
      decrypt/lito_extract.py for the from-scratch server-side twin of this same logic
      and the full validation writeup -- this is a deliberate JS port of already-proven code,
      not a fresh guess. Prefer the .LRF over the .MP4: same telemetry (djmd track is
-     identical either way), 1/8th the size, so it's what's actually safe to read in a tab. */
+     identical either way), 1/8th the size, so it's what's actually safe to read in a tab.
+
+     7 Sep 2026: the main .MP4 is now handled too, at ANY size, because nothing below reads the
+     whole file any more. The video's box headers are walked by seeking (a handful of 16-byte
+     reads), the moov index is read on its own (well under 1 MB), and then only the telemetry
+     samples are sliced out (~250 KB for a 13-minute flight). A 9 GB video costs under 2 MB of
+     reads and never leaves the machine. Why it was needed: Paul's replacement Lito X1 had to be
+     re-bound to its controller, which reset the SRT-alongside-video toggle, so his flights have
+     video and no SRT. Proven two ways: against Paul's 11 Aug flight, which has both the video and
+     a good sidecar SRT (1,150 frames compared, lat/lon/rel_alt exact, abs_alt to 1 mm), and on a
+     24 Jul video with no SRT anywhere (777 frames, byte-identical to decrypt/lito_extract.py). */
+
+  // -- read only what is asked for. A File.slice() is a view, not a copy: nothing comes off disk
+  //    until arrayBuffer() is awaited on the slice, so the cost is exactly the bytes named. --
+  async function readRange(file, offset, length) {
+    return new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+  }
+
+  // Walk the TOP-LEVEL box headers by seeking, 16 bytes at a time, until the moov box is found,
+  // then read exactly that box. Handles moov-at-end (every DJI camera: ftyp, free…, mdat, moov),
+  // moov-at-start (a faststart re-encode) and 64-bit mdat sizes alike, in a few tiny reads.
+  async function locateMoov(file) {
+    let o = 0, guard = 0;
+    while (o + 8 <= file.size && guard++ < 64) {
+      const h = await readRange(file, o, 16);
+      if (h.length < 8) return null;
+      const dv = new DataView(h.buffer, h.byteOffset, h.byteLength);
+      let size = dv.getUint32(0), headerLen = 8;
+      const type = String.fromCharCode(h[4], h[5], h[6], h[7]);
+      if (size === 1) {
+        if (h.length < 16) return null;
+        size = dv.getUint32(8) * 4294967296 + dv.getUint32(12); headerLen = 16;
+      } else if (size === 0) {
+        size = file.size - o;
+      }
+      if (size < headerLen) return null;            // malformed: stop, never spin
+      if (type === 'moov') {
+        if (size > 64 * 1024 * 1024) return null;    // a real moov is a few MB at most
+        return { offset: o, bytes: await readRange(file, o, size) };
+      }
+      o += size;
+    }
+    return null;
+  }
 
   // -- minimal ISO-BMFF (MP4/MOV) box walker: just enough to find the djmd track's
   //    sample table and slice its raw sample bytes out of the file, in-browser. --
@@ -331,10 +374,11 @@
   }
   function findBox(boxes, type) { return boxes.find(b => b.type === type); }
 
-  function findDjmdTrack(fullDv, fileSize) {
-    // moov can sit anywhere in the file; scan top-level boxes to find it (mdat is usually
-    // much bigger, so read top-level box headers first rather than assuming an offset).
-    const top = readBoxes(fullDv, 0, fileSize);
+  function findDjmdTrack(fullDv, start, end) {
+    // Given a buffer holding the moov box (locateMoov) — or a whole small file — find the
+    // track whose sample description is 'djmd'. Chunk offsets inside it are ABSOLUTE file
+    // positions, which is what makes slicing the samples straight out of the file possible.
+    const top = readBoxes(fullDv, start, end);
     const moov = findBox(top, 'moov');
     if (!moov) return null;
     const moovKids = readBoxes(fullDv, moov.bodyStart, moov.end);
@@ -468,50 +512,71 @@
     if (typeof lat !== 'number' || typeof lon !== 'number') return null;
     const absAltRaw = pbGet(msg, 3, 3, 4, 2);
     const relAltRaw = pbGet(msg, 3, 3, 5, 1);
+    const tsRaw = pbGet(msg, 3, 1, 2);            // TimeStamp, microseconds
     return {
       lat, lon,
       absAlt: absAltRaw != null ? pbInt64s(absAltRaw) / 1000 : null,
       relAlt: typeof relAltRaw === 'number' ? relAltRaw / 1000 : null,
+      tsUs: typeof tsRaw === 'bigint' ? Number(tsRaw) : (typeof tsRaw === 'number' ? tsRaw : null),
     };
   }
 
   async function extractLitoSrt(file, onProgress) {
-    // Read once (LRF-sized files only, <~30MB -- see the .mp4/.mov size gate in decode())
-    // and reuse the same buffer for both box-walking and sample extraction.
-    const buf = await file.arrayBuffer();
-    const dv = new DataView(buf);
-    const u8all = new Uint8Array(buf);
-    const track = findDjmdTrack(dv, buf.byteLength);
+    const moov = await locateMoov(file);
+    if (!moov) return null;
+    const mdv = new DataView(moov.bytes.buffer, moov.bytes.byteOffset, moov.bytes.byteLength);
+    const track = findDjmdTrack(mdv, 0, moov.bytes.byteLength);
     if (!track) return null;
     const ranges = sampleByteRanges(track);
     if (ranges.length < 2) return null;
+    // Samples inside one chunk are laid end to end, so contiguous ranges collapse into ONE read
+    // per chunk: a 13-minute flight is a few hundred reads, not 47,000 slices.
+    const runs = [];
+    for (const r of ranges) {
+      const last = runs[runs.length - 1];
+      if (last && last.offset + last.size === r.offset) { last.size += r.size; last.n++; }
+      else runs.push({ offset: r.offset, size: r.size, n: 1 });
+    }
     const startMs = (() => {
       const m = (file.name || '').match(/(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/);
       if (!m) return Date.now();
       return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
     })();
     const frames = [];
-    for (let i = 0; i < ranges.length; i++) {
-      const r = ranges[i];
-      const f = decodeLitoFrame(u8all.subarray(r.offset, r.offset + r.size));
-      frames.push(f);
-      if (onProgress && (i % 50 === 0)) { onProgress(Math.round(i / ranges.length * 100)); await new Promise(res => setTimeout(res, 0)); }
+    let idx = 0, done = 0;
+    for (const run of runs) {
+      const buf = await readRange(file, run.offset, run.size);
+      let o = 0;
+      for (let k = 0; k < run.n; k++, idx++) {
+        const size = ranges[idx].size;
+        frames.push(decodeLitoFrame(buf.subarray(o, o + size)));
+        o += size;
+      }
+      done += run.n;
+      if (onProgress) { onProgress(Math.round(done / ranges.length * 100)); await new Promise(res => setTimeout(res, 0)); }
     }
-    // ~30 fps for the LRF track (confirmed on the validation sample) -- used only to space
-    // frame timestamps; GPS/altitude values themselves came straight from the track.
-    const dtMs = 1000 / 30;
+    // Frame timing comes from the track's own microsecond timestamps when it carries them, so the
+    // .MP4 (59.94 fps) and the .LRF proxy (30 fps) both come out right without guessing a rate.
+    // The fixed spacing is only the fallback for a track without them.
+    const haveTs = frames.length > 1 && frames[0] && frames[1]
+      && frames[0].tsUs != null && frames[1].tsUs != null && frames[1].tsUs > frames[0].tsUs;
+    const fallbackDt = /\.lrf$/i.test(file.name || '') ? 1000 / 30 : 1000 / 59.94;
+    const tOf = (i) => (haveTs && frames[i] && frames[i].tsUs != null)
+      ? (frames[i].tsUs - frames[0].tsUs) / 1000 : i * fallbackDt;
     const pad = (n, w) => String(n).padStart(w, '0');
-    const tc = (ms) => { const s = Math.max(0, ms / 1000); return `${pad(Math.floor(s / 3600), 2)}:${pad(Math.floor(s % 3600 / 60), 2)}:${pad(Math.floor(s % 60), 2)},${pad(Math.round((s - Math.floor(s)) * 1000), 3)}`; };
+    const tc = (ms) => { const s = Math.max(0, ms / 1000); return `${pad(Math.floor(s / 3600), 2)}:${pad(Math.floor(s % 3600 / 60), 2)}:${pad(Math.floor(s % 60), 2)},${pad(Math.round(ms % 1000), 3)}`; };
     let out = '', wrote = 0;
     for (let i = 0; i < frames.length; i++) {
       const f = frames[i]; if (!f) continue;
-      const t = i * dtMs, nt = (i + 1 < frames.length ? (i + 1) : i + 1) * dtMs;
+      const t = tOf(i);
+      const nt = i + 1 < frames.length ? tOf(i + 1) : t + (i > 0 ? t - tOf(i - 1) : fallbackDt);
+      const diff = Math.max(1, Math.round(nt - t));
       const when = new Date(startMs + t);
       const z = (x) => String(x).padStart(2, '0');
-      const stamp = `${when.getFullYear()}-${z(when.getMonth() + 1)}-${z(when.getDate())} ${z(when.getHours())}:${z(when.getMinutes())}:${z(when.getSeconds())}.${String(when.getMilliseconds()).padStart(3, '0')}`;
+      const stamp = `${when.getFullYear()}-${z(when.getMonth() + 1)}-${z(when.getDate())} ${z(when.getHours())}:${z(when.getMinutes())}:${z(when.getSeconds())}.${pad(when.getMilliseconds(), 3)}`;
       const rel = f.relAlt != null ? f.relAlt : 0, abs = f.absAlt != null ? f.absAlt : 0;
       wrote++;
-      out += `${wrote}\n${tc(t)} --> ${tc(nt)}\n<font size="28">FrameCnt: ${wrote}, DiffTime: 33ms\n${stamp}\n`
+      out += `${wrote}\n${tc(t)} --> ${tc(nt)}\n<font size="28">FrameCnt: ${wrote}, DiffTime: ${diff}ms\n${stamp}\n`
         // fnum 1.7 = the Lito X1's REAL fixed aperture — and load-bearing: the dashboard bake's
         // model heuristic reads "wide lens at f>=2.5" as a Matrice 4E, so the old 2.8 placeholder
         // mislabelled Lito flights as M4E and misattributed them (21 double-counted, 28 Jul 2026).
@@ -554,11 +619,20 @@
         return Object.assign(res, { kind: 'LITO', model: 'DJI Lito X1', extractedSrt: srt });
       }
       if (lower.endsWith('.mp4') || lower.endsWith('.mov')) {
+        // Lito X1 FIRST: it is the cheap test (a few header reads plus the moov index) and, since
+        // 7 Sep 2026, the main .MP4 is read by byte range so any size is tab-safe. A video with no
+        // djmd track falls through to the Matrice 4E's chunked text scan.
+        const lito = await extractLitoSrt(file, onProgress);
+        if (lito) {
+          const res = decodeSRT(lito, file.name);
+          if (!res.ok) return Object.assign(res, { kind: 'LITO' });
+          return Object.assign(res, { kind: 'LITO', model: 'DJI Lito X1', extractedSrt: lito });
+        }
         const srt = await extractM4eSrt(file, onProgress);
         if (!srt) {
           return { ok: false, kind: 'M4E', name: file.name,
-            error: 'No embedded telemetry in this video \u2014 Matrice 4E videos carry it, but a '
-              + 'Lito X1 video does not. The Lito now writes a .SRT next to the .MP4: drop that.' };
+            error: 'No embedded telemetry in this video \u2014 Matrice 4E and Lito X1 videos carry '
+              + 'it; other airframes write a .SRT next to the .MP4: drop that instead.' };
         }
         const res = decodeSRT(srt, file.name);
         if (!res.ok) return Object.assign(res, { kind: 'M4E' });

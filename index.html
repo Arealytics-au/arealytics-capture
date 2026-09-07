@@ -114,10 +114,13 @@ const fmtBytes = (n) => n < 1024 ? n + ' B'
 // uploads, written back to the source folder. Lito X1 was the second exception until 28 Jul 2026,
 // when the crew switched SRT-alongside-video ON at the controller: it now writes a plain .SRT next
 // to the .MP4, so its upload is IDENTICAL to the Air 3S and the form says nothing special about it.
-// .lrf stays in the accept pattern purely as a silent fallback (a card recorded before the switch,
-// or a controller that lost the setting); the .mp4 is still deliberately NOT accepted for the Lito
-// (100+ MB, would need the M4E's chunked-scan treatment — see flight-decoder.js's size reasoning).
-const FILE_ACCEPT = { air3s: /\.(srt|txt)$/i, lito: /\.(srt|txt|lrf)$/i, m4e: /\.(srt|txt|mp4|mov)$/i };
+// .lrf stays in the accept pattern as a silent fallback (a card recorded before the switch, or a
+// controller that lost the setting). 7 Sep 2026: the Lito .mp4/.mov is accepted too. Paul's
+// replacement airframe had to be re-bound to its controller, which reset that toggle, so his
+// flights have video and no SRT; flight-decoder.js now reads the telemetry out of the video by
+// byte range (under 2 MB of reads for a 9 GB file), so any size is tab-safe and the video itself
+// never uploads — only the recovered .SRT does, exactly as for the Matrice 4E.
+const FILE_ACCEPT = { air3s: /\.(srt|txt)$/i, lito: /\.(srt|txt|lrf|mp4|mov)$/i, m4e: /\.(srt|txt|mp4|mov)$/i };
 const okFile = (name, droneType) => (FILE_ACCEPT[droneType] || FILE_ACCEPT.air3s).test(name);
 const fkey = (f) => f.name + '|' + f.size;
 const todayISO = () => { const d = new Date(); const z = (x) => String(x).padStart(2, '0');
@@ -1429,7 +1432,7 @@ function App() {
                 background: drag ? 'rgba(10,31,92,0.04)' : '#fff', padding: '22px 18px', cursor: 'pointer',
                 textAlign: 'center', transition: 'all .15s' }}>
               <input ref={fileRef} type="file" multiple
-                accept={droneType === 'm4e' ? '.srt,.txt,.mp4,.mov' : droneType === 'lito' ? '.srt,.txt,.lrf' : '.srt,.txt'}
+                accept={droneType === 'm4e' ? '.srt,.txt,.mp4,.mov' : droneType === 'lito' ? '.srt,.txt,.lrf,.mp4,.mov' : '.srt,.txt'}
                 hidden onChange={(e) => addFiles(e.target.files)} />
               <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke={NAVY} strokeWidth="1.7"
                 style={{ marginBottom: 6 }}><path d="M12 16V4M12 4 L7 9M12 4 L17 9" strokeLinecap="round" strokeLinejoin="round"/>
@@ -1444,12 +1447,16 @@ function App() {
                 <b>Matrice 4E:</b> drop the whole <b>card folder</b> (with the .MP4s) — the SRT is sniffed out of each video in place (the video never uploads) and written <b>straight back into that folder</b> after you submit, so VST has the MP4 + SRT together. In the embedded app it downloads a .zip instead — open in a browser tab for the direct card write.
               </div>
             )}
-            {/* 28 Jul 2026: the Lito X1 note is GONE. The controllers now have SRT-alongside-video
-                switched on, so the Lito writes a .SRT next to the .MP4 like every other airframe and
-                the upload is identical to the Air 3S — .SRT + .TXT. There is nothing Lito-specific
-                left to say, so nothing is said. (.lrf is still ACCEPTED by the picker and still
-                decodes, as a silent fallback for a card recorded before the switch was flipped, or a
-                controller that lost the setting. It is simply no longer instructed.) */}
+            {/* 28 Jul 2026 the Lito note was removed: with SRT-alongside-video switched on at the
+                controller the upload was identical to the Air 3S. 7 Sep 2026 it is back, narrowly,
+                because a re-bound controller loses that setting (Paul's replacement airframe) and
+                the pilot is then holding videos with no SRT. The fix is the same as the M4E's: drop
+                the video, the SRT is read out of it in place, the video never uploads. */}
+            {droneType === 'lito' && (
+              <div style={{ marginTop: 8, fontSize: 12.5, color: NAVY, background: '#EEF2FB', border: `1px solid ${LINE}`, borderRadius: 10, padding: '9px 12px', lineHeight: 1.45 }}>
+                <b>Lito X1:</b> drop the .SRT and .TXT as usual. <b>No .SRT on the card?</b> Drop the <b>.MP4</b> instead — the SRT is read out of the video right here (the video itself never uploads, only the recovered SRT does). Then check the controller: Camera settings → <i>Video Subtitles</i> must be ON, or the next card will be the same.
+              </div>
+            )}
             {files.length > 0 && (
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 7 }}>
                 {files.map((f, i) => {
