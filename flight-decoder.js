@@ -542,17 +542,29 @@
       if (!m) return Date.now();
       return new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]).getTime();
     })();
-    const frames = [];
+    // Paul's 7 Sep 2026 flight showed the real shape of a long recording: 44,139 telemetry samples
+    // in 44,139 chunks, ONE per chunk, 170 KB apart across 7.5 GB. So "one read per chunk" is one
+    // read per frame, and a yield per read would be minutes of dead waiting in a browser (a nested
+    // setTimeout is clamped to 4 ms+). Reads therefore go out in concurrent batches, and the UI is
+    // yielded to once per batch: ~700 yields for that flight instead of 44,139.
+    const BATCH = 64;
+    const frames = new Array(ranges.length);
     let idx = 0, done = 0;
-    for (const run of runs) {
-      const buf = await readRange(file, run.offset, run.size);
-      let o = 0;
-      for (let k = 0; k < run.n; k++, idx++) {
-        const size = ranges[idx].size;
-        frames.push(decodeLitoFrame(buf.subarray(o, o + size)));
-        o += size;
+    for (let b = 0; b < runs.length; b += BATCH) {
+      const slice = runs.slice(b, b + BATCH);
+      const firstIdx = idx;
+      const bufs = await Promise.all(slice.map(run => readRange(file, run.offset, run.size)));
+      idx = firstIdx;
+      for (let r = 0; r < slice.length; r++) {
+        const run = slice[r], buf = bufs[r];
+        let o = 0;
+        for (let k = 0; k < run.n; k++, idx++) {
+          const size = ranges[idx].size;
+          frames[idx] = decodeLitoFrame(buf.subarray(o, o + size));
+          o += size;
+        }
+        done += run.n;
       }
-      done += run.n;
       if (onProgress) { onProgress(Math.round(done / ranges.length * 100)); await new Promise(res => setTimeout(res, 0)); }
     }
     // Frame timing comes from the track's own microsecond timestamps when it carries them, so the
