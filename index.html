@@ -73,9 +73,13 @@ window.DECRYPT_ENDPOINT = CONFIG.DECRYPT_ENDPOINT;   // flight-decoder.js reads 
 // prefers home-state matches and the submission stamps the home state on every tagged area.
 const ROSTER = [
   { id: 'op-marc',   name: 'Marc Margot',    state: 'NSW' },
-  { id: 'op-paul',   name: 'Paul McConnell', state: 'NSW' },
+  // deployed: where this operator is CURRENTLY working, when that is not their home state.
+  // Paul and Jakob are in Brisbane for roughly six weeks from mid-September 2026. `state` stays as
+  // their home base so ending the deployment is deleting one field, not remembering what it was.
+  // Keep this in step with DEPLOYED in decrypt/pilots.py — this form is a separate public deploy.
+  { id: 'op-paul',   name: 'Paul McConnell', state: 'NSW', deployed: 'QLD' },
   { id: 'op-lucas',  name: 'Lucas Moy',      state: 'VIC' },
-  { id: 'op-jakob',  name: 'Jakob Kelly',    state: 'VIC' },
+  { id: 'op-jakob',  name: 'Jakob Kelly',    state: 'VIC', deployed: 'QLD' },
   { id: 'op-damien', name: 'Damien Poole',   state: 'QLD' },
   { id: 'op-alex',   name: 'Alex Ballard',   state: 'NSW' },
   { id: 'op-joe',    name: 'Joe Arthey',     state: 'WA' },
@@ -159,8 +163,13 @@ const AU_LOCS = (() => {
   }
   return { rows, byPost };
 })();
-// Stable-sort matches so the operator's HOME STATE lists first — same-named suburbs exist in
+// Stable-sort matches so the operator's CURRENT state lists first — same-named suburbs exist in
 // several states (Guildford NSW/TAS/WA) and pilots kept picking the wrong state's entry.
+// `deployed` beats `state`: a pilot working interstate was being offered their home city's suburb
+// first, and with the list capped at 8 rows the entry they actually wanted could fall off the
+// bottom entirely. See opState() below.
+// Where the operator is working RIGHT NOW: their deployment if they have one, else home base.
+function opState(op) { return (op && (op.deployed || op.state)) || ''; }
 function homeFirst(rows, home) {
   if (!home) return rows;
   return rows.filter(r => r.t === home).concat(rows.filter(r => r.t !== home));
@@ -200,8 +209,10 @@ function AreaAutocomplete({ cover, onChange, index, home }) {
   const pick = (r) => { onChange({ suburb: r.s, postcode: r.p, state: r.t }); setOpenField(null); };
   const onSuburb = (v) => {
     const patch = { suburb: v };
-    // Unique-match auto-fill prefers the operator's HOME STATE: "Guildford" is NSW+TAS+WA, and
-    // Paul (NSW) must land on 2161 — never Tasmania's 7321 (13 Jul 2026).
+    // Unique-match auto-fill prefers the operator's CURRENT state (deployment first, else home):
+    // "Guildford" is NSW+TAS+WA, and Paul must land on 2161 — never Tasmania's 7321 (13 Jul 2026).
+    // While he is deployed to Brisbane that same preference points at QLD, so a Brisbane suburb
+    // auto-fills a Brisbane postcode instead of a Sydney one (10 Sep 2026).
     const exact = AU_LOCS.rows.filter(r => r.s.toLowerCase() === v.trim().toLowerCase());
     const inHome = home ? exact.filter(r => r.t === home) : [];
     const use = inHome.length === 1 ? inHome[0] : (exact.length === 1 ? exact[0] : null);
@@ -713,9 +724,12 @@ function App() {
       // (image ↔ suburb/postcode/state); `area_flown` is the joined free-text kept for the existing ingest.
       areas: (didFly && covers.length) ? covers.map((c, i) => ({
         image: coverNameFor(c, i), suburb: (c.suburb || '').trim(),
-        // The OPERATOR'S home state is authoritative for attribution — a wrong-state autocomplete
-        // pick must never re-state their work. The picked state is kept as state_picked for trace.
-        postcode: (c.postcode || '').trim(), state: (op && op.state) || c.state || '',
+        // WAS: state: (op && op.state) || c.state — the home state overwrote the pilot's own pick,
+        // so a Brisbane area tagged QLD was submitted as NSW. That rule exists to stop a wrong-state
+        // autocomplete pick restating work, which is real, but it also overrode a pilot who has
+        // actually moved. The pick now leads and the operator's CURRENT state (deployment first)
+        // backs it up. The ingest re-derives from the postcode anyway, which settles it outright.
+        postcode: (c.postcode || '').trim(), state: (c.state || '').trim() || opState(op),
         // REFLY: this area re-covers already-counted ground. Credited to the pilot, excluded from
         // the national universe. Always emitted as a real boolean so a missing tick is an explicit
         // false rather than an absent key the pipeline has to guess about.
@@ -1560,7 +1574,7 @@ function App() {
                         </div>
                         <button onClick={(e) => { e.stopPropagation(); removeCover(i); }} title="Remove" style={{ color: FAINT, fontSize: 18, lineHeight: 1, padding: '0 2px' }}>×</button>
                       </div>
-                      <AreaAutocomplete cover={c} index={i} home={(op && op.state) || ''} onChange={(patch) => updateCover(i, patch)} />
+                      <AreaAutocomplete cover={c} index={i} home={opState(op)} onChange={(patch) => updateCover(i, patch)} />
                     </div>
                   ))}
                   <div style={{ fontSize: 12, color: MUTED, fontFamily: '"JetBrains Mono", monospace', marginTop: 2 }}>
