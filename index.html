@@ -626,7 +626,11 @@ function App() {
         const a = document.createElement('a');
         a.href = url; a.download = s.name; document.body.appendChild(a); a.click(); a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 5000);
-        setSrtSaved('✓ 1 SRT downloaded — check your Downloads folder.');
+        // Deliberately NOT "✓ downloaded" — a.click() never throws even when the browser silently
+        // refuses the save (a cross-origin embedded frame is exactly where that happens), so this
+        // line was reporting success it had not confirmed. Say what we actually know, and always
+        // point at the one path that DOES confirm (below), instead of a check mark we can't back up.
+        setSrtSaved('Download started — check your Downloads folder. If it isn’t there, use “Open in browser” below and “Save to card” instead, which confirms the save.');
         return;
       }
       const zip = new window.JSZip();
@@ -637,7 +641,8 @@ function App() {
       a.href = URL.createObjectURL(blob); a.download = zipName;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(a.href), 8000);
-      setSrtSaved('✓ All ' + srts.length + ' SRTs downloaded as ' + zipName + ' — unzip them into your card folder.');
+      // See the single-file branch above for why this is "started", not "✓ downloaded".
+      setSrtSaved('Download of all ' + srts.length + ' SRTs started as ' + zipName + ' — check your Downloads folder. If it isn’t there, use “Open in browser” below and “Save to card” instead, which confirms the save.');
     } catch (e) {
       setSrtSaved('Could not package the SRTs (' + ((e && e.message) || e) + '). Try “Open in browser”.');
     }
@@ -1276,10 +1281,15 @@ function App() {
                       ? '⬇︎ Download ' + extractedSrts().length + ' SRT' + (extractedSrts().length === 1 ? '' : 's') + ' (.zip)'
                       : '💾 Save ' + extractedSrts().length + ' SRT' + (extractedSrts().length === 1 ? '' : 's') + ' back to my SD card'}
                   </button>}
-              {isEmbedded && !srtSaved && (
+              {/* Stays visible after an attempted download too (not just before) — an embedded download
+                  is never confirmed (see downloadSrts()), so the one path that DOES confirm needs to
+                  stay on screen exactly when it matters most: after a "started" message with nothing
+                  to show for it. */}
+              {isEmbedded && (
                 <p style={{ margin: '8px auto 0', fontSize: 12, color: MUTED, maxWidth: 380, lineHeight: 1.5 }}>
-                  In the embedded form the browser can’t write to your card, so this downloads one .zip (all files, none dropped).
-                  To write the SRTs <b>straight onto the card</b>, use <b>Open in browser</b> and drag the whole card folder in.
+                  In the embedded form the browser can’t write to your card, so this downloads one .zip (all files, none dropped) —
+                  and cannot confirm it arrived. To write the SRTs <b>straight onto the card</b> and know for certain, use{' '}
+                  <b>Open in browser</b> and drag the whole card folder in.
                 </p>
               )}
             </div>
