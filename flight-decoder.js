@@ -508,8 +508,15 @@
     const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     const msg = pbDecodeMessage(bytes, dv, 0);
     if (!msg) return null;
-    const lat = pbGet(msg, 3, 3, 4, 1, 2), lon = pbGet(msg, 3, 3, 4, 1, 3);
-    if (typeof lat !== 'number' || typeof lon !== 'number') return null;
+    // RAD2DEG: the djmd track stores lat/lon in radians, the same DJI convention already
+    // handled correctly for the .txt flight record decoder above (see RAD2DEG's other use).
+    // Missing here, this decoder returned raw radians as if they were degrees -- correct in
+    // magnitude-of-error terms only by accident (a near-(0,0) point), and the "site" lookup
+    // then matched whichever real city was numerically closest to that bogus point. Found 30
+    // Sep 2026 from Damien Poole's Coomera QLD flight: raw home (-0.486313, 2.676058) converts
+    // to (-27.8656, 153.3401), matching Coomera 4209 (his own tagged capture suburb) precisely.
+    const lat = pbGet(msg, 3, 3, 4, 1, 2) * RAD2DEG, lon = pbGet(msg, 3, 3, 4, 1, 3) * RAD2DEG;
+    if (typeof lat !== 'number' || typeof lon !== 'number' || Number.isNaN(lat) || Number.isNaN(lon)) return null;
     const absAltRaw = pbGet(msg, 3, 3, 4, 2);
     const relAltRaw = pbGet(msg, 3, 3, 5, 1);
     const tsRaw = pbGet(msg, 3, 1, 2);            // TimeStamp, microseconds
