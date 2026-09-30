@@ -127,6 +127,11 @@ const fmtBytes = (n) => n < 1024 ? n + ' B'
 const FILE_ACCEPT = { air3s: /\.(srt|txt)$/i, lito: /\.(srt|txt|lrf|mp4|mov)$/i, m4e: /\.(srt|txt|mp4|mov)$/i };
 const okFile = (name, droneType) => (FILE_ACCEPT[droneType] || FILE_ACCEPT.air3s).test(name);
 const fkey = (f) => f.name + '|' + f.size;
+// The DJI flight-record date lives IN the filename (DJIFlightRecord_YYYY-MM-DD_[..].txt), so this
+// reads even for an encrypted .txt this form never decrypts. Used only to catch a stale file dated
+// differently than the rest of the submission -- 30 Sep 2026, Damien Poole resubmitted two old
+// 22 Sep logs alongside fresh 29 Sep videos and nothing in the form said so.
+const filenameDateISO = (name) => { const m = /(\d{4})-(\d{2})-(\d{2})/.exec(name || ''); return m ? `${m[1]}-${m[2]}-${m[3]}` : null; };
 const todayISO = () => { const d = new Date(); const z = (x) => String(x).padStart(2, '0');
   return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())}`; };
 const prettyDate = (iso) => { try { return new Date(iso + 'T00:00:00').toLocaleDateString('en-AU',
@@ -358,6 +363,8 @@ function App() {
   const [covers, setCovers] = useState([]);       // [{ file, url, suburb, postcode, state }] — each marked screenshot carries its OWN tied location (pilots fly MULTIPLE areas)
   const [files, setFiles] = useState([]);        // File[]
   const [decoded, setDecoded] = useState({});    // fkey -> { status, ...summary }
+  const [staleAck, setStaleAck] = useState(false);   // pilot confirmed a date-mismatched file is correct
+  useEffect(() => { setStaleAck(false); }, [files]);  // never carries over to a different file set
   // Ref, NOT state: it's read inside async decode callbacks (M4E extraction can run for minutes),
   // and a state value there is a stale closure — the pilot's manually-set date got clobbered.
   const dateTouchedRef = useRef(false);
@@ -418,6 +425,14 @@ function App() {
   const decodedNote = decList.length
     ? `  ·  ${decOk + decEnc} flight ${(decOk + decEnc) === 1 ? 'log' : 'logs'} ready${decErr ? ` · ${decErr} unreadable — remove to submit` : ''}${decSec ? ` · ${Math.round(decSec / 60)} min flown` : ''}`
     : '';
+
+  // STALE-FILE WARNING (30 Sep 2026). A file's real date is its own dateISO when the decoder found
+  // one (any .srt/.mp4/.mov), or the date embedded in a .txt's filename otherwise -- never guessed,
+  // never left silent. Flagged against the submission's OWN date field (set from the first decoded
+  // file, or typed by the pilot), because a genuine backlog day is a valid submission and must not
+  // be blocked; only a file that disagrees with what THIS submission says it is gets a warning.
+  const fileDateISO = (f) => { const d = decoded[fkey(f)]; return (d && d.dateISO) || filenameDateISO(f.name); };
+  const staleFiles = date ? files.filter(f => { const d = fileDateISO(f); return d && d !== date; }) : [];
 
   // ---- per-field completion (drives the ticks + the submit gate) ----
   const decStates = files.map(f => decoded[fkey(f)] || { status: 'decoding' });
@@ -683,6 +698,12 @@ function App() {
     if (files.length === 0) errors.push('Upload the day’s .SRT / .TXT flight logs — or pick a non-flying day above.');
     else if (anyDecoding) errors.push('Checking your files… one moment.');
     else if (anyError) errors.push('Remove the file(s) that couldn’t be read, then add the correct ones.');
+    // A file dated differently than this submission is a silent mix-up otherwise (30 Sep 2026: old
+    // 22 Sep flight logs went in beside fresh 29 Sep videos, with nothing here saying so). Not
+    // blocked outright — a genuine backlog day is a real submission — but it must be SEEN and
+    // ticked, not sailed past.
+    if (staleFiles.length && !staleAck)
+      errors.push(`${staleFiles.length} file${staleFiles.length > 1 ? 's are' : ' is'} dated differently than ${prettyDate(date)} — check the list below, then tick to confirm.`);
     // Coverage screenshot is REQUIRED on a flying day — it's the visual record of the area flown.
     if (!covers.length) errors.push('Add at least one coverage screenshot of the area(s) you flew (marked & coloured).');
     // Every screenshot must carry its OWN suburb + postcode — that's the location tied to that photo.
@@ -1522,8 +1543,10 @@ function App() {
                   const dec = decoded[fkey(f)] || { status: 'decoding' };
                   const isTxt = /\.txt$/i.test(f.name);
                   const mins = dec.durationSec ? `${Math.floor(dec.durationSec / 60)}m ${dec.durationSec % 60}s` : null;
+                  const fDate = fileDateISO(f);
+                  const isStale = date && fDate && fDate !== date;
                   return (
-                    <div key={f.name + i} style={{ background: '#fff', border: `1px solid ${LINE}`, borderRadius: 9, padding: '9px 12px' }}>
+                    <div key={f.name + i} style={{ background: '#fff', border: `1px solid ${isStale ? '#E7C98A' : LINE}`, borderRadius: 9, padding: '9px 12px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                         <span style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 10.5, fontWeight: 700,
                           color: '#fff', background: isTxt ? NAVY : ORANGE, padding: '3px 6px', borderRadius: 5 }}>
@@ -1539,11 +1562,24 @@ function App() {
                         {dec.status === 'encrypted' && <span style={{ color: '#0B8B43' }}>✓ {dec.model || 'Flight log'} · ready · will be processed after upload</span>}
                         {dec.status === 'error' && <span style={{ color: MUTED }}>⏭ Skipped — {dec.error}</span>}
                       </div>
+                      {isStale && (
+                        <div style={{ marginTop: 5, fontSize: 12, color: '#7A4B00' }}>
+                          ⚠ Dated {prettyDate(fDate)}, not {prettyDate(date)} — is this the right file?
+                        </div>
+                      )}
                     </div>
                   );
                 })}
                 <div style={{ fontSize: 12, color: MUTED, fontFamily: '"JetBrains Mono", monospace', marginTop: 2 }}>
                   {files.length} file{files.length > 1 ? 's' : ''} · {fmtBytes(totalBytes)}{decodedNote}</div>
+                {staleFiles.length > 0 && (
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, marginTop: 4, fontSize: 12.5,
+                    color: '#7A4B00', background: '#FFF6E5', border: '1px solid #E7C98A', borderRadius: 10, padding: '9px 12px', lineHeight: 1.45 }}>
+                    <input type="checkbox" checked={staleAck} onChange={(e) => setStaleAck(e.target.checked)} style={{ marginTop: 2 }} />
+                    <span><b>{staleFiles.length} file{staleFiles.length > 1 ? 's are' : ' is'} dated differently</b> than {prettyDate(date)}, the date this submission is for.
+                    {' '}If that's genuinely a backlog day you're catching up on, tick to confirm and submit. If it's not, remove it above and add the right file instead.</span>
+                  </label>
+                )}
               </div>
             )}
 
