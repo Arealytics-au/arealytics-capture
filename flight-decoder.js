@@ -528,7 +528,7 @@
     };
   }
 
-  async function extractLitoSrt(file, onProgress) {
+  async function extractLitoSrt(file, onProgress, fnum) {
     const moov = await locateMoov(file);
     if (!moov) return null;
     const mdv = new DataView(moov.bytes.buffer, moov.bytes.byteOffset, moov.bytes.byteLength);
@@ -599,13 +599,13 @@
         // fnum 1.7 = the Lito X1's REAL fixed aperture — and load-bearing: the dashboard bake's
         // model heuristic reads "wide lens at f>=2.5" as a Matrice 4E, so the old 2.8 placeholder
         // mislabelled Lito flights as M4E and misattributed them (21 double-counted, 28 Jul 2026).
-        + `[iso: 100] [shutter: 1/1000.0] [fnum: 1.7] [ev: 0] [color_md: default] [focal_len: 24.00] `
+        + `[iso: 100] [shutter: 1/1000.0] [fnum: ${(fnum || 1.7).toFixed(1)}] [ev: 0] [color_md: default] [focal_len: 24.00] `
         + `[latitude: ${f.lat.toFixed(6)}] [longitude: ${f.lon.toFixed(6)}] [rel_alt: ${rel.toFixed(3)} abs_alt: ${abs.toFixed(3)}] </font>\n\n`;
     }
     return wrote >= 2 ? out : null;
   }
 
-  async function decode(file, onProgress) {
+  async function decode(file, onProgress, droneType) {
     const lower = (file.name || '').toLowerCase();
     try {
       if (lower.endsWith('.srt')) {
@@ -638,6 +638,29 @@
         return Object.assign(res, { kind: 'LITO', model: 'DJI Lito X1', extractedSrt: srt });
       }
       if (lower.endsWith('.mp4') || lower.endsWith('.mov')) {
+        // A djmd TRACK NO LONGER MEANS LITO (7 Oct 2026). Damien's Matrice 4E (flight controller
+        // firmware 13.x) now embeds the same protobuf telemetry track the Lito X1 does, so the
+        // "found djmd, therefore Lito" rule below labelled a whole Noosa mapping day of M4E videos
+        // "DJI Lito X1" at upload. The pilot has already said which drone flew ("Which drone did
+        // you fly today?"): when that is the Matrice, the M4E's own subtitle text stream is tried
+        // first, and if only the djmd track is there it is still the Matrice, written at f/2.8 so
+        // the bake's lens heuristic reads it as one too. The Lito-first order stays for everyone
+        // else, where it is the cheap test and the right answer.
+        if (droneType === 'm4e') {
+          const m4e = await extractM4eSrt(file, onProgress);
+          if (m4e) {
+            const res = decodeSRT(m4e, file.name);
+            if (res.ok) return Object.assign(res, { kind: 'M4E', model: 'Matrice 4E', extractedSrt: m4e });
+          }
+          const djmd = await extractLitoSrt(file, onProgress, 2.8);
+          if (djmd) {
+            const res = decodeSRT(djmd, file.name);
+            if (!res.ok) return Object.assign(res, { kind: 'M4E' });
+            return Object.assign(res, { kind: 'M4E', model: 'Matrice 4E', extractedSrt: djmd });
+          }
+          return { ok: false, kind: 'M4E', name: file.name,
+            error: 'No embedded telemetry in this video \u2014 drop the .SRT that sits next to it instead.' };
+        }
         // Lito X1 FIRST: it is the cheap test (a few header reads plus the moov index) and, since
         // 7 Sep 2026, the main .MP4 is read by byte range so any size is tab-safe. A video with no
         // djmd track falls through to the Matrice 4E's chunked text scan.

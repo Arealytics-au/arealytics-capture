@@ -27,7 +27,7 @@
 <!-- Zero-setup fallback: bundle the day's files into one downloadable package. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <!-- In-browser DJI decoder: validates & summarises .SRT / .TXT on upload. -->
-<script src="flight-decoder.js?v=3"></script>
+<script src="flight-decoder.js?v=4"></script>
 <!-- AU suburb↔postcode table (offline) — powers the per-area autocomplete/cross-fill on the coverage screenshots. -->
 <script src="au-localities.js?b=1"></script>
 </head>
@@ -496,7 +496,7 @@ function App() {
       if (!window.FlightDecoder) { setDecoded(d => ({ ...d, [k]: { status: 'error', error: 'decoder failed to load — reload the page and re-add this file' } })); return Promise.resolve(); }
       return window.FlightDecoder.decode(f, (pct) => {
         setDecoded(d => ({ ...d, [k]: { ...(d[k] || {}), status: 'decoding', progress: pct } }));
-      }).then(res => {
+      }, droneType).then(res => {
         setDecoded(d => ({ ...d, [k]: { status: res.ok ? ((res.encrypted && !res.decrypted) ? 'encrypted' : 'ok') : 'error', ...res } }));
         // First valid SRT date auto-fills the capture date (until the operator edits it).
         if (res.ok && res.dateISO && !dateTouchedRef.current) setDate(res.dateISO);
