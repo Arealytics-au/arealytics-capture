@@ -5,6 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="ext-resource-dependency" content="assets/arealytics-logo-full.png" />
 <title>Arealytics — Daily Capture Submission</title>
+<script>
+  // ONE WAY IN (Damien, 12th October 2026: "fixed once and for all"). This form can only file the SIGNED
+  // submission record when it runs inside the field app (arealytics-field.pages.dev, behind the Access
+  // login), where the gateway knows who the pilot is. Opened on its own, from the public GitHub Pages
+  // link, it could deliver files but not the record, and told the pilot to "open the daily log from the
+  // field app". Pilots kept landing here anyway. So a standalone copy anywhere except the field app's own
+  // origin (or a developer's localhost) now sends the pilot straight to the field app instead of
+  // showing a form that cannot finish the job. Inside the field app the form is an iframe
+  // (window.parent !== window), so this never fires there.
+  (function () {
+    var standalone = window.parent === window;
+    var here = location.hostname;
+    var fieldApp = /(^|\.)arealytics-field\.pages\.dev$/.test(here) || here === 'localhost' || here === '127.0.0.1';
+    if (standalone && !fieldApp) {
+      document.documentElement.innerHTML = '<body style="font-family:system-ui;padding:40px;color:#0A1F5C">'
+        + '<h2>Opening the Arealytics field app…</h2><p>The daily log is submitted from the field app so your '
+        + 'record is signed. If nothing happens, go to <a href="https://arealytics-field.pages.dev/">arealytics-field.pages.dev</a>.</p></body>';
+      location.replace('https://arealytics-field.pages.dev/');
+    }
+  })();
+</script>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet" />
