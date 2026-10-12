@@ -1233,9 +1233,20 @@ function App() {
     // so it belongs in the same problems list the operator already reads — never a silent pass.
     if (recorded && !recorded.ok) {
       problems.push('Your files were delivered, but the signed submission record could not be filed: '
-        + (recorded.error || 'unknown reason') + '. Tell Damien — the files are safe, the record is missing.');
+        + (recorded.error || 'unknown reason') + '. The files are safe; this has been logged for Damien automatically.');
     }
     if (problems.length) {
+      // FILE THE PROBLEM, DO NOT MAKE THE PILOT THE MESSENGER (Damien, 12th October 2026: "I just want everything
+      // to run smoothly"). A small problem-<ref>.json lands in the pilot's upload folder beside the day's files, the
+      // 07:00 all clear reads it, and Damien hears once, from the system, not at 6pm from a pilot. Best effort: a
+      // failure to file it never changes what the pilot is told.
+      try {
+        const note = { ref: meta.ref, operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+          at: new Date().toISOString(), problems, failed, coverage_failed: coverFailed };
+        await postDriveRetry({ operator: meta.operator, op_id: meta.op_id, date: meta.capture_date,
+          name: 'problem-' + meta.ref + '.json', mimeType: 'application/json',
+          dataB64: btoa(unescape(encodeURIComponent(JSON.stringify(note)))) });
+      } catch (e) { /* the problem text itself is still shown below */ }
       // The retry advice is correct for a partial or unconfirmed delivery, and actively wrong when
       // the service itself is down — see the branch above.
       const retryAdvice = verifyDrive.lastWhy === 'error'
